@@ -37,6 +37,9 @@ import type { ChatSettings } from "./contracts/chat.ts";
 import { isSearchEngineId, type SearchEngineId } from "./search.ts";
 import { isDictationLanguage, type DictationLanguage } from "./dictation.ts";
 import { parseFileAccessSettings, type FileAccessSettings } from "./file-access.ts";
+import { BLOCKED_MCP_SETTINGS, parseMcpSettings, type McpSettings } from "./mcp-settings.ts";
+
+export type { McpSettings, McpSetup } from "./mcp-settings.ts";
 import { COLOR_OVERRIDE_KEYS, isThemeId, type AppearanceColorOverrides } from "./themes.ts";
 
 /** The schema version this code understands. Bump ONLY for breaking shape
@@ -531,6 +534,7 @@ export interface UserSettings {
 	appearance?: AppearanceSettings;
 	graph?: GraphSettings;
 	compaction?: CompactionSettings;
+	mcp?: McpSettings;
 	[key: string]: unknown;
 }
 
@@ -937,13 +941,17 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	if (r.compaction !== undefined && r.compaction !== null && typeof r.compaction === "object") {
 		out.compaction = sanitizeCompaction(r.compaction as Record<string, unknown>);
 	}
+	if (r.mcp !== undefined) {
+		const parsed = parseMcpSettings(r.mcp);
+		out.mcp = parsed.ok ? parsed.settings : { ...BLOCKED_MCP_SETTINGS };
+	}
 	// Unknown top-level keys ride along untouched (forward-compat). One
 	// known-DEAD key is stripped instead of riding: `chat` (the old
 	// default-settings section) died with per-session models (owner,
 	// 2026-09-28) — a fossil copy on disk must never resurrect through
 	// reads (and any later write flushes it from the file for good).
 	for (const [key, value] of Object.entries(r)) {
-		if (key === "chat") continue;
+		if (key === "chat" || key === "mcp") continue;
 		if (!(key in out)) out[key] = value;
 	}
 	return out;

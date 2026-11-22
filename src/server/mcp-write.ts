@@ -9,16 +9,21 @@ import { resolveSourcePath } from "../agent/tools/fs-shared.ts";
 import { parseFilePaths, quoteFilePath } from "../core/file-paths.ts";
 import { isMcpWriteToken, MCP_PROFILE_HEADER, mcpWriteOperationSchema, mcpWriteProfileProof, type McpWriteOperation } from "../mcp/write-protocol.ts";
 import { MCP_CLIENT_HEADER, MCP_CLIENT_REQUEST_BYTES, mcpClientOperationSchema, type McpClientOperation } from "../mcp/client-protocol.ts";
+import { readMcpSettings } from "../store/settings.ts";
 import { CustomBodyLimitError, readBoundedJson } from "./custom-provider-body.ts";
 import { browserOnlyMode } from "./desktop-access.ts";
 import { fileAccessPolicy } from "./file-access.ts";
+import { MCP_LOOPBACK_AUTHORITY, resolveMcpFilesDirectory } from "./mcp-settings.ts";
 
 const MAX_BODY_BYTES = 16 * 1024;
-const LOOPBACK_AUTHORITY = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/i;
 const INVALID_PATH_CHARACTER = /[\\:\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const WINDOWS_DEVICE = /^(?:CON(?:IN\$|OUT\$)?|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])(?:\.|$)/i;
 const OPEN_FILE_POLICY = { restricted: false, folders: [], unavailable: [] };
 const FILE_REFUSAL = "The document is unavailable or outside the approved file access.";
+const MCP_WRITES_DISABLED = "MCP writes are disabled in LearnHarness Settings.";
+const CLIENT_OBSERVATION_OPERATIONS: ReadonlySet<McpClientOperation["operation"]> = new Set([
+	"get_session_state", "list_side_threads", "read_side_thread", "list_graph_sources", "get_operation", "cancel_operation",
+]);
 
 interface McpWriteDependencies {
 	importGraphNotes(files: File[], paths: FormDataEntryValue[]): Promise<Response>;
@@ -44,20 +49,6 @@ function isRelativeFile(relative: string): boolean {
 	if (INVALID_PATH_CHARACTER.test(relative)) return false;
 	return relative.split("/").every(segment => segment !== "" && segment !== "." && segment !== ".." &&
 		(process.platform !== "win32" || (!/[<>"|?*]|[. ]$/.test(segment) && !WINDOWS_DEVICE.test(segment))));
-}
-
-async function filesRoot(configured: string | undefined): Promise<string | null> {
-	if (!configured || !path.isAbsolute(configured)) return null;
-	if (process.platform === "win32" && /^[\\/]$/.test(path.parse(configured).root)) return null;
-	try {
-		const stat = await lstat(/* turbopackIgnore: true */ configured);
-		if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
-		const canonical = await realpath(/* turbopackIgnore: true */ configured);
-		const checked = await lstat(/* turbopackIgnore: true */ canonical);
-		return checked.isDirectory() && stat.dev === checked.dev && stat.ino === checked.ino ? canonical : null;
-	} catch {
-		return null;
-	}
 }
 
 function isSingleLinkFile(stat: Stats): boolean {
@@ -122,7 +113,7 @@ export async function handleMcpWriteRequest(request: Request, deps: McpWriteDepe
 	const token = env.LH_MCP_WRITE_TOKEN;
 	const authorization = request.headers.get("authorization");
 	const authority = request.headers.get("host");
-	if (!browserOnlyMode(env) || !authority || !LOOPBACK_AUTHORITY.test(authority) || !isMcpWriteToken(token) ||
+	if (!browserOnlyMode(env) || !authority || !MCP_LOOPBACK_AUTHORITY.test(authority) || !isMcpWriteToken(token) ||
 		!authorization?.startsWith("Bearer ") || !matchesHex(authorization.slice(7), token)) {
 		return errorResponse("MCP write access is unavailable or unauthorized.", 403);
 	}
@@ -141,26 +132,34 @@ export async function handleMcpWriteRequest(request: Request, deps: McpWriteDepe
 			? errorResponse(clientReasoning ? "MCP client request exceeds the 256 KiB limit." : "MCP write request exceeds the 16 KiB limit.", 413)
 			: errorResponse("Invalid MCP write JSON.", 400);
 	}
+	const { settings, error: settingsError } = readMcpSettings();
 	if (clientReasoning) {
 		if (!deps.handleMcpClientOperation) return errorResponse("Client-driven inference is unavailable.", 503);
 		const client = mcpClientOperationSchema.safeParse(body);
 		if (!client.success) return errorResponse("Invalid MCP client operation.", 400);
 		const operation = client.data;
-		const root = "request_id" in operation ? await filesRoot(env.LH_MCP_FILES_DIR) : null;
+		// Leave authenticated reads and cancellation available to connected clients.
+		// The gates still cover both new work and inference steps for existing work.
+		if (!CLIENT_OBSERVATION_OPERATIONS.has(operation.operation)) {
+			if (!settings.allowWrites) return errorResponse(settingsError ?? MCP_WRITES_DISABLED, 403);
+			if (!settings.allowClientReasoning) return errorResponse("MCP client reasoning is disabled in LearnHarness Settings.", 403);
+		}
+		const root = "request_id" in operation ? await resolveMcpFilesDirectory(env.LH_MCP_FILES_DIR, settings.filesDirectory) : null;
 		return deps.handleMcpClientOperation(operation, () => operation.operation === "import_file" || operation.operation === "attach_file"
-			? executeFileOperation(operation, deps, env)
+			? executeFileOperation(operation, deps, root)
 			: Promise.resolve(errorResponse("This operation does not take a file.", 400)), root ?? undefined);
 	}
 	const parsed = mcpWriteOperationSchema.safeParse(body);
 	if (!parsed.success) return errorResponse("Invalid MCP write operation or relative file path.", 400);
-	return executeFileOperation(parsed.data, deps, env);
+	if (!settings.allowWrites) return errorResponse(settingsError ?? MCP_WRITES_DISABLED, 403);
+	const root = await resolveMcpFilesDirectory(env.LH_MCP_FILES_DIR, settings.filesDirectory);
+	return executeFileOperation(parsed.data, deps, root);
 }
 
-async function executeFileOperation(operation: McpWriteOperation, deps: McpWriteDependencies, env: Record<string, string | undefined>): Promise<Response> {
+async function executeFileOperation(operation: McpWriteOperation, deps: McpWriteDependencies, root: string | null): Promise<Response> {
 	if (!isRelativeFile(operation.path)) return errorResponse("Invalid MCP write operation or relative file path.", 400);
 	const importing = operation.operation === "import_file";
 	if (importing && !IMPORT_EXTENSIONS.test(operation.path)) return errorResponse(UNSUPPORTED_TYPE_MESSAGE, 400);
-	const root = await filesRoot(env.LH_MCP_FILES_DIR);
 	if (!root) return errorResponse("The MCP files directory is not configured or cannot be accessed.", 503);
 
 	let file: { filename: string; stat: Stats };

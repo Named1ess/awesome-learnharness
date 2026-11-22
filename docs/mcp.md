@@ -4,6 +4,14 @@ The LearnHarness MCP server gives a local client read-only access by default to 
 
 Configure the client to start Node with the absolute path to `scripts/learnharness-mcp.mjs` and exactly one `--data-dir` argument pointing to an existing absolute directory. The server communicates over stdio. Startup diagnostics go to stderr.
 
+## MCP settings in LearnHarness
+
+Open **Settings → MCP** in the local app to check the setup, see the learning-data directory, and copy a Codex or Claude configuration. The check reports what the running app can provide. Register the configuration in the client to connect. Write configurations reference `LH_MCP_WRITE_TOKEN` or include a placeholder for it. Use the token from your private local environment for both app and client.
+
+In the source app, use **Allow writes** and **Allow client reasoning** to change which MCP requests LearnHarness accepts. Disabling either takes effect on subsequent requests, including submitted inference steps. Authorized clients can still inspect or cancel existing operations, and stdio read tools are independent of these switches. To refresh the tools shown by the client, update its configuration and reconnect.
+
+Enter an existing absolute **Shared files folder** within the launcher's `LH_MCP_FILES_DIR` to narrow file access, or leave it blank to use the launcher directory. File paths are relative to the effective folder. A saved folder that becomes unavailable blocks new file requests until you repair or clear it. Operations already accepted keep the folder chosen at their start.
+
 ## Codex
 
 Add a [local MCP server entry](https://developers.openai.com/codex/mcp) to your Codex configuration. Replace the example paths with yours.
@@ -70,7 +78,7 @@ Set the same `LH_MCP_WRITE_TOKEN` for the MCP child process. In Codex, `env_vars
 node scripts/learnharness-mcp.mjs --data-dir "C:/path/to/learning-data" --app-url http://localhost:3000
 ```
 
-The MCP data directory must match the running app's data directory. The app validates each path relative to `LH_MCP_FILES_DIR`. Graph imports open the file and read its contents. Attachments send a native file reference in the learner's message. Use forward slashes in relative paths, such as `course notes/lecture.pdf`.
+The MCP data directory must match the running app's data directory. The app validates each path relative to `LH_MCP_FILES_DIR`. Graph imports open the file and read its contents. Attachments send a native file reference in the learner's message. Use forward slashes in relative paths, such as `course-notes/lecture.pdf`.
 
 | Tool | Inputs | Result |
 | --- | --- | --- |

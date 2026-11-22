@@ -17,13 +17,18 @@ const byTest = (id: string) => {
 	return element;
 };
 
-function fixture() {
+function fixture(mcpFetch?: (init?: RequestInit) => Promise<Response>) {
 	const dom = parseHTML("<html><head></head><body><div id='root'></div></body></html>");
 	const globals = { React, window: dom.window, document: dom.document, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true };
 	const saved = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
 	Object.assign(globalThis, globals);
 	const restoreModal = installModalDom(dom);
+	const textarea = dom.window.HTMLTextAreaElement.prototype;
+	const originalDefaultValue = Object.getOwnPropertyDescriptor(textarea, "defaultValue");
+	Object.defineProperty(textarea, "defaultValue", { configurable: true, get() { return this.textContent; }, set(text) { this.textContent = text; } });
 	restore = () => {
+		if (originalDefaultValue) Object.defineProperty(textarea, "defaultValue", originalDefaultValue);
+		else Reflect.deleteProperty(textarea, "defaultValue");
 		restoreModal();
 		for (const [key, descriptor] of saved) {
 			if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -31,7 +36,8 @@ function fixture() {
 		}
 	};
 	let settingsReads = 0;
-	globalThis.fetch = async input => {
+	globalThis.fetch = async (input, init) => {
+		if (String(input) === "/api/mcp/settings" && mcpFetch) return mcpFetch(init);
 		if (String(input) === "/api/settings") {
 			settingsReads++;
 			return Response.json({ settings: { version: 1 } });
@@ -84,6 +90,86 @@ afterEach(async () => {
 	await act(async () => root?.unmount()); root = undefined;
 	await new Promise(resolve => setTimeout(resolve, 5));
 	restore?.(); restore = undefined; globalThis.fetch = originalFetch;
+});
+
+it("MCP shows the saved setup and updates manual snippets only after a successful save", async () => {
+	const writes: unknown[] = [];
+	const status = { sourceMode: true, tokenConfigured: true, filesDirectory: "C:/Shared MCP", filesAvailable: true,
+		dataDirectory: "C:/Learning Data", nodeCommand: "C:/Program Files/nodejs/node.exe", scriptPath: "C:/LearnHarness/scripts/learnharness-mcp.mjs", appUrl: "http://localhost:3000" };
+	let settings = { allowWrites: true, allowClientReasoning: true, filesDirectory: null as string | null };
+	let reads = 0;
+	const f = fixture(async init => {
+		if (init?.method === "PUT") {
+			settings = JSON.parse(String(init.body)) as typeof settings;
+			writes.push(settings);
+		} else reads++;
+		return Response.json({ settings, status });
+	});
+	await f.mount(); await f.open("mcp");
+	assert.equal(byTest("settings-nav-mcp").getAttribute("aria-current"), "true");
+	assert.match(byTest("section-mcp").textContent ?? "", /C:\/Learning Data/);
+	assert.match((byTest("mcp-snippet") as HTMLTextAreaElement).value, /--client-reasoning/);
+	const reasoning = byTest("toggle-allow-client-reasoning");
+	assert.equal(reasoning.getAttribute("aria-checked"), "true");
+	await act(async () => reasoning.click());
+	assert.equal(reasoning.getAttribute("aria-checked"), "false");
+	assert.match((byTest("mcp-snippet") as HTMLTextAreaElement).value, /--client-reasoning/);
+	await act(async () => byTest("mcp-save").closest("form")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })));
+	assert.deepEqual(writes, [{ allowWrites: true, allowClientReasoning: false, filesDirectory: null }]);
+	let snippet = (byTest("mcp-snippet") as HTMLTextAreaElement).value;
+	assert.doesNotMatch(snippet, /--client-reasoning/);
+	assert.match(snippet, /env_vars = \["LH_MCP_WRITE_TOKEN"\]/);
+	await act(async () => byTest("mcp-client-claude").click());
+	snippet = (byTest("mcp-snippet") as HTMLTextAreaElement).value;
+	const claude = JSON.parse(snippet);
+	assert.deepEqual(claude.mcpServers.learnharness.args, [status.scriptPath, "--data-dir", status.dataDirectory, "--app-url", status.appUrl]);
+	assert.equal(claude.mcpServers.learnharness.command, status.nodeCommand);
+	assert.equal(claude.mcpServers.learnharness.env.LH_MCP_WRITE_TOKEN, "YOUR_LOCAL_MCP_WRITE_TOKEN");
+	await act(async () => byTest("mcp-check-setup").click());
+	assert.equal(reads, 2);
+});
+
+it("reopening the MCP tab waits for an earlier save and reads the committed policy", async () => {
+	const release = Promise.withResolvers<void>();
+	const status = { sourceMode: true, tokenConfigured: true, filesDirectory: "C:/MCP", filesAvailable: true,
+		dataDirectory: "C:/Data", nodeCommand: "node", scriptPath: "C:/LearnHarness/scripts/learnharness-mcp.mjs", appUrl: "http://localhost:3000" };
+	let settings = { allowWrites: true, allowClientReasoning: true, filesDirectory: null };
+	let reads = 0;
+	const f = fixture(async init => {
+		if (init?.method === "PUT") {
+			await release.promise;
+			settings = JSON.parse(String(init.body)) as typeof settings;
+		} else reads++;
+		return Response.json({ settings, status });
+	});
+	await f.mount(); await f.open("mcp");
+	await act(async () => byTest("toggle-allow-writes").click());
+	try {
+		await act(async () => byTest("mcp-save").closest("form")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true })));
+		assert.equal(byTest("mcp-save").textContent, "Saving…");
+		await f.open("graph"); await f.open("mcp");
+		assert.equal(byTest("mcp-check-setup").textContent, "Checking…");
+		assert.equal(reads, 1);
+	} finally {
+		await act(async () => release.resolve());
+	}
+	assert.equal(reads, 2);
+	assert.equal(byTest("toggle-allow-writes").getAttribute("aria-checked"), "false");
+	assert.doesNotMatch((byTest("mcp-snippet") as HTMLTextAreaElement).value, /--app-url|--client-reasoning|LH_MCP_WRITE_TOKEN/);
+});
+
+it("MCP offers read-only client configuration on an unsupported host", async () => {
+	const f = fixture(async () => Response.json({ settings: { allowWrites: true, allowClientReasoning: true, filesDirectory: null },
+		status: { sourceMode: false, tokenConfigured: false, filesDirectory: null, filesAvailable: false,
+			dataDirectory: "C:/Data", nodeCommand: "node", scriptPath: null, appUrl: null } }));
+	await f.mount(); await f.open("mcp");
+	assert.match(byTest("section-mcp").textContent ?? "", /Read only on this host/);
+	assert.equal(byTest("toggle-allow-writes").hasAttribute("disabled"), true);
+	assert.equal(byTest("toggle-allow-client-reasoning").hasAttribute("disabled"), true);
+	assert.equal(byTest("mcp-files-directory").hasAttribute("disabled"), true);
+	const snippet = (byTest("mcp-snippet") as HTMLTextAreaElement).value;
+	assert.match(snippet, /\/path\/to\/LearnHarness\/scripts\/learnharness-mcp\.mjs/);
+	assert.doesNotMatch(snippet, /--app-url|--client-reasoning|LH_MCP_WRITE_TOKEN/);
 });
 
 it("Settings remains painted, mounted and stateful beneath a child; one Escape restores only Settings", async () => {
