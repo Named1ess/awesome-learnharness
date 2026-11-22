@@ -186,7 +186,7 @@ Keep the same project layout and build locally. Either copy the completed `dist/
    ```json
    {
      "scripts": {
-       "install:local": "npm run build && node scripts/install-plugin-local.mjs"
+       "install:local": "node scripts/install-plugin-local.mjs --build"
      }
    }
    ```
@@ -197,11 +197,13 @@ Keep the same project layout and build locally. Either copy the completed `dist/
    npm run install:local -- "<plugins-directory>"
    ```
 
-The command builds first. If the build fails, installation does not run. The helper uses
-only Node built-ins, checks the built manifest/entry files, and installs under the
-manifest's plugin ID. The supplied plugins directory must already exist. It does not
-infer a profile or save configuration. The host still decides app compatibility and
-reserved-ID admission when you refresh.
+With `--build`, the helper runs the plugin project's `npm run build` first. A failed
+build stops the command before installation. If you already built the plugin, run
+`node scripts/install-plugin-local.mjs "<plugins-directory>"` to install it directly.
+The helper uses only Node built-ins, checks the built manifest and entry files, and
+installs under the manifest's plugin ID. The supplied plugins directory must already
+exist. It does not infer a profile or save configuration. The host still decides app
+compatibility and reserved-ID admission when you refresh.
 
 For updates, the helper stages a complete replacement before moving the previous `dist/`
 aside; stale assets are removed rather than merged. If replacement fails, it restores the

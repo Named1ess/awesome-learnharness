@@ -17,6 +17,12 @@ from typing import Any
 sys.dont_write_bytecode = True
 
 
+def configure_cli_output() -> None:
+    """Use UTF-8 for CLI output, including when redirected to a pipe."""
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 class DataError(Exception):
     """An actionable reader error, suitable for stderr without a traceback."""
 

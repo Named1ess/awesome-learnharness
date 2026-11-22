@@ -12,6 +12,7 @@ import { describe, it } from "node:test";
 const mainFile = fileURLToPath(new URL("../electron/main.cjs", import.meta.url));
 const mainSource = readFileSync(mainFile, "utf8");
 const mainRequire = createRequire(mainFile);
+const initialUserData = path.resolve("fixture", "custom-user-data");
 
 function fixture({ packaged = true, updaterMissing = false } = {}) {
 	let settings: string | Error = JSON.stringify({ version: 1, general: { autoUpdate: true } });
@@ -22,7 +23,7 @@ function fixture({ packaged = true, updaterMissing = false } = {}) {
 	const listeners = new Map<string, (event: unknown) => void>();
 	const windows: FakeWindow[] = [];
 	let enumerationFails = false;
-	let userData = "/fixture/custom-user-data";
+	let userData = initialUserData;
 	let menu: { submenu?: { label?: string; click?: () => void }[] }[] = [];
 	class FakeUpdater extends EventEmitter {
 		checks = 0;
@@ -132,7 +133,7 @@ describe("automatic-update preference gate", () => {
 		f.run("setupAutoUpdater()");
 		await f.check();
 		assert.equal(f.updater.checks, 0);
-		assert.deepEqual(f.settingsReads, ["/fixture/custom-user-data-dev/data/settings.json"]);
+		assert.deepEqual(f.settingsReads, [path.join(`${initialUserData}-dev`, "data", "settings.json")]);
 		await f.check(true);
 		assert.equal(f.updater.checks, 1);
 		assert.equal(f.settingsReads.length, 1);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { directoryLinkType, fileSymlinkUnavailable, tryFileSymlink } from "./helpers/filesystem-links.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -73,11 +74,15 @@ test("invalid save and failed rename preserve the previous file and remove tempo
 	assert.equal(readFileSync(join(directory, "task_one.json"), "utf8"), before);
 });
 
-test("strict get/list refuse task files that are directories or symlinks", t => {
+test("strict get/list refuse task files that are directories", t => {
 	const directory = fixture(t); const store = createPluginTaskRecordStore(directory);
 	mkdirSync(join(directory, "folder.json")); assert.throws(() => store.get("folder"), /Unsafe/); assert.throws(() => store.list(), /Unsafe/);
-	rmSync(join(directory, "folder.json"), { recursive: true });
-	const outside = join(directory, "outside.txt"); writeFileSync(outside, JSON.stringify(record())); symlinkSync(outside, join(directory, "task_one.json"));
+});
+
+test("strict get/list refuse task files that are symlinks", t => {
+	const directory = fixture(t); const store = createPluginTaskRecordStore(directory);
+	const outside = join(directory, "outside.txt"); writeFileSync(outside, JSON.stringify(record()));
+	if (!tryFileSymlink(outside, join(directory, "task_one.json"))) return t.skip(fileSymlinkUnavailable);
 	assert.throws(() => store.get("task_one"), /Unsafe/); assert.throws(() => store.list(), /Unsafe/);
 });
 
@@ -135,9 +140,9 @@ test("bootstrap recovery includes disabled packages, interrupts all unfinished r
 
 test("bootstrap missing root stays missing, and unsafe package paths are per-package errors", t => {
 	const base = fixture(t); const missing = join(base, "missing"); assert.deepEqual(recoverPluginTaskRecords(missing), {}); assert(!existsSync(missing));
-	const root = join(base, "root"); mkdirSync(root); symlinkSync(base, join(root, "unsafe-plugin")); mkdirSync(join(root, "Invalid_ID"));
+	const root = join(base, "root"); mkdirSync(root); symlinkSync(base, join(root, "unsafe-plugin"), directoryLinkType); mkdirSync(join(root, "Invalid_ID"));
 	const errors = recoverPluginTaskRecords(root); assert.match(errors["unsafe-plugin"]!, /Unsafe/); assert.match(errors.Invalid_ID!, /Invalid plugin id/);
-	const rootLink = join(base, "link"); symlinkSync(root, rootLink); assert.throws(() => recoverPluginTaskRecords(rootLink), /Unsafe/);
+	const rootLink = join(base, "link"); symlinkSync(root, rootLink, directoryLinkType); assert.throws(() => recoverPluginTaskRecords(rootLink), /Unsafe/);
 });
 
 test("core recovery uses only core-plugin-data, skips reserved community copies and includes disabled tasks", t => {
@@ -156,12 +161,14 @@ test("core recovery uses only core-plugin-data, skips reserved community copies 
 	recoverPluginTaskRecords(root, core); assert.equal(readFileSync(join(core.directory, "official", "tasks", "task_one.json"), "utf8"), before);
 });
 
-test("recovery refuses symlinks at every root/plugin/data/tasks component and at the task file", t => {
-	for (const component of ["root", "plugin", "data", "tasks", "file"]) {
+for (const component of ["root", "plugin", "data", "tasks", "file"]) {
+	test(`recovery refuses a link at the ${component} component`, t => {
 		const base = fixture(t); const root = join(base, "plugins"); const directory = join(root, "fixture-plugin", "data", "tasks");
 		createPluginTaskRecordStore(directory).save(success());
 		const target = component === "root" ? root : component === "plugin" ? join(root, "fixture-plugin") : component === "data" ? join(root, "fixture-plugin", "data") : component === "tasks" ? directory : join(directory, "task_one.json");
-		const moved = join(base, "moved"); renameSync(target, moved); symlinkSync(moved, target);
+		const moved = join(base, "moved"); renameSync(target, moved);
+		if (component !== "file") symlinkSync(moved, target, directoryLinkType);
+		else if (!tryFileSymlink(moved, target)) return t.skip(fileSymlinkUnavailable);
 		assert.throws(() => readPluginTaskRecord(root, "fixture-plugin", "task_one"), /Unsafe/);
-	}
-});
+	});
+}

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { it } from "node:test";
+import { directoryLinkType, fileSymlinkUnavailable, tryFileSymlink } from "./helpers/filesystem-links.ts";
 import { execFileSync } from "node:child_process";
 import { AUTHORING_DOCS, AUTHORING_EXAMPLES, AUTHORING_PROJECTS, buildPluginAuthoring, createAuthoringZip } from "../scripts/build-plugin-authoring.mjs";
 import { markdownAnchors, markdownProse, seedAuthoringReferenceFixture } from "./helpers/plugin-authoring-fixture.ts";
@@ -54,7 +55,7 @@ function unzip(bytes: Buffer) {
 	assert.equal(offset + 22, bytes.length);
 	return result;
 }
-function fixture(run: (root: string) => void) {
+function fixture<T>(run: (root: string) => T): T {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-authoring-test-"));
 	const source = path.resolve(import.meta.dirname, "..");
 	const write = (relative: string, text: string) => {
@@ -72,7 +73,7 @@ function fixture(run: (root: string) => void) {
 		write("scripts/build-plugin-types.mjs", `import fs from 'node:fs';const p=process.argv[2];fs.mkdirSync(p,{recursive:true});fs.writeFileSync(p+'/package.json',JSON.stringify({name:'learnharness-plugin-api',version:'1.0.0'}));fs.writeFileSync(p+'/index.d.ts','export interface Example {}');`);
 		write("docs/not-authoring.md", "not bundled"); write("data/private.json", "AUTHORING_PRIVATE_SENTINEL_9b1f"); write("auth.json", "AUTHORING_PRIVATE_SENTINEL_9b1f");
 		write("examples/plugins/unrelated/dist/manifest.json", "not bundled");
-		run(root);
+		return run(root);
 	} finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -140,22 +141,25 @@ it("regenerates deterministic dev and standalone archives without stale expanded
 	assert.equal(packaged.directory, path.join(root, ".next/standalone/plugin-authoring"));
 }));
 
-it("refuses unsafe example contents, source symlinks and output symlinks without changing their targets", () => {
-	for (const mode of ["data", "credentials", "source-link", "output-link", "dangling-output-link"]) fixture(root => {
+for (const mode of ["data", "credentials", "source-link", "output-link", "dangling-output-link"]) {
+	it(`refuses unsafe example or output: ${mode}`, t => fixture(root => {
 		const dist = path.join(root, "examples/plugins/hello-plugin/dist");
 		const outside = path.join(root, "keep.txt"); fs.writeFileSync(outside, "preserve");
 		if (mode === "data") fs.mkdirSync(path.join(dist, "data"));
 		if (mode === "credentials") fs.writeFileSync(path.join(dist, ".env.local"), "private");
-		if (mode === "source-link") fs.symlinkSync(outside, path.join(dist, "linked.js"));
+		if (mode === "source-link" && !tryFileSymlink(outside, path.join(dist, "linked.js"))) return t.skip(fileSymlinkUnavailable);
 		if (mode.includes("output-link")) {
 			fs.mkdirSync(path.join(root, "public"));
-			fs.symlinkSync(mode.startsWith("dangling") ? path.join(root, "missing") : root, path.join(root, "public/plugin-authoring"), "dir");
+			fs.symlinkSync(mode.startsWith("dangling") ? path.join(root, "missing") : root, path.join(root, "public/plugin-authoring"), directoryLinkType);
 		}
 		assert.throws(() => buildPluginAuthoring({ root }), /Refusing/);
 		assert.equal(fs.readFileSync(outside, "utf8"), "preserve");
-	});
-});
-it("rejects every curated source-file symlink before replacing existing outputs", () => {
+	}));
+}
+it("rejects every curated source-file symlink before replacing existing outputs", t => {
+	if (process.platform === "win32" && !fixture(root => tryFileSymlink(path.join(root, "package.json"), path.join(root, "symlink-probe")))) {
+		return t.skip(fileSymlinkUnavailable);
+	}
 	for (const relative of ["skills/learnharness-plugins/SKILL.md", "package.json", "LICENSE", "docs/plugin-authoring.md", "skills/learnharness-plugins/README.md", "examples/plugins/hello-plugin/README.md", "examples/plugins/hello-plugin/dist/manifest.json", "examples/plugins/hello-plugin/dist/main.js", "scripts/build-plugin-types.mjs", "scripts/build-plugin-api-reference.mjs", "scripts/install-plugin-local.mjs", "plugins/flashcards/src/main.js", "plugins/ui-showcase/README.md"]) fixture(root => {
 		const built = buildPluginAuthoring({ root });
 		const archive = fs.readFileSync(built.archive), skill = fs.readFileSync(path.join(built.directory, "SKILL.md"));
@@ -163,7 +167,8 @@ it("rejects every curated source-file symlink before replacing existing outputs"
 		try {
 			const source = path.join(root, relative), target = path.join(external, path.basename(source));
 			fs.copyFileSync(source, target);
-			fs.unlinkSync(source); fs.symlinkSync(target, source);
+			fs.unlinkSync(source);
+			fs.symlinkSync(target, source, "file");
 			assert.throws(() => buildPluginAuthoring({ root }), /Refusing.*symlink/, relative);
 			assert.deepEqual(fs.readFileSync(built.archive), archive, relative);
 			assert.deepEqual(fs.readFileSync(path.join(built.directory, "SKILL.md")), skill, relative);
@@ -178,7 +183,7 @@ it("rejects source ancestor-directory symlinks before replacing existing outputs
 		try {
 			const source = path.join(root, relative), target = path.join(external, "source");
 			fs.cpSync(source, target, { recursive: true });
-			fs.rmSync(source, { recursive: true }); fs.symlinkSync(target, source, "dir");
+			fs.rmSync(source, { recursive: true }); fs.symlinkSync(target, source, directoryLinkType);
 			assert.throws(() => buildPluginAuthoring({ root }), /Refusing.*symlink/, relative);
 			assert.deepEqual(fs.readFileSync(built.archive), archive, relative);
 			assert.deepEqual(fs.readFileSync(path.join(built.directory, "SKILL.md")), skill, relative);

@@ -13,7 +13,7 @@ import argparse
 import json
 import re
 
-from _data import DataError, add_common_arguments, data_root, print_json, read_chat, read_json, safe_path
+from _data import DataError, add_common_arguments, configure_cli_output, data_root, print_json, read_chat, read_json, safe_path
 
 
 def warn(message):
@@ -279,4 +279,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    configure_cli_output()
     raise SystemExit(main())

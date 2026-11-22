@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from _data import DataError, add_common_arguments, data_root, print_json, read_chat, safe_path
+from _data import DataError, add_common_arguments, configure_cli_output, data_root, print_json, read_chat, safe_path
 
 QUESTION_TOOLS = {"quiz", "probe", "ask_user_question", "explain", "recall"}
 LEARNING_TOOLS = QUESTION_TOOLS | {"problem", "conclude", "probe_done", "plan_init", "research", "pdf", "visual", "demo"}
@@ -463,4 +463,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_cli_output()
     raise SystemExit(main())

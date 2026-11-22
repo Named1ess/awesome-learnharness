@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { it } from "node:test";
 import ts from "typescript";
 import { createPluginApiReference, writePluginApiReference } from "../scripts/build-plugin-api-reference.mjs";
+import { fileSymlinkUnavailable, tryFileSymlink } from "./helpers/filesystem-links.ts";
 
 function fixture(run: (root: string, write: (file: string, text: string) => void) => void) {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "lh-api-reference-test-")));
@@ -37,14 +38,19 @@ it("does not follow declaration imports outside the SDK", () => fixture((root, w
 	assert.throws(() => createPluginApiReference({ sdk: path.join(root, "sdk") }), /Refusing.*outside or missing SDK/);
 }));
 
-it("refuses source and output links and writing over the input SDK", () => fixture((root, write) => {
+it("refuses writing over the input SDK", () => fixture((root, write) => {
+	write("sdk/index.d.ts", "export interface Api { readonly value: string }");
+	assert.throws(() => writePluginApiReference({ sdk: path.join(root, "sdk"), output: path.join(root, "sdk") }), /Refusing/);
+}));
+
+it("refuses source and output file symlinks", t => fixture((root, write) => {
 	write("sdk/index.d.ts", "export interface Api { readonly value: string }");
 	write("keep.txt", "preserve");
-	fs.symlinkSync(path.join(root, "keep.txt"), path.join(root, "sdk/linked.d.ts"));
+	if (!tryFileSymlink(path.join(root, "keep.txt"), path.join(root, "sdk/linked.d.ts"))) return t.skip(fileSymlinkUnavailable);
 	assert.throws(() => createPluginApiReference({ sdk: path.join(root, "sdk") }), /Refusing.*symlink/);
 	fs.unlinkSync(path.join(root, "sdk/linked.d.ts"));
-	assert.throws(() => writePluginApiReference({ sdk: path.join(root, "sdk"), output: path.join(root, "sdk") }), /Refusing/);
-	fs.mkdirSync(path.join(root, "output")); fs.symlinkSync(path.join(root, "keep.txt"), path.join(root, "output/README.md"));
+	fs.mkdirSync(path.join(root, "output"));
+	fs.symlinkSync(path.join(root, "keep.txt"), path.join(root, "output/README.md"), "file");
 	assert.throws(() => writePluginApiReference({ sdk: path.join(root, "sdk"), output: path.join(root, "output") }), /Refusing.*symlink/);
 	assert.equal(fs.readFileSync(path.join(root, "keep.txt"), "utf8"), "preserve");
 }));
@@ -81,6 +87,6 @@ it("the committed reference covers every real SDK public type/member and exactly
 	assert.equal(reference.inventory.reduce((n: number, entry: { exports: string[] }) => n + entry.exports.length, 0), count);
 	const committed = path.resolve("docs/plugin-api");
 	assert.deepEqual(fs.readdirSync(committed).sort(), [...reference.pages.keys()].sort());
-	for (const [filename, text] of reference.pages) assert.equal(fs.readFileSync(path.join(committed, filename), "utf8"), text, `Regenerate stale reference: ${filename}`);
+	for (const [filename, text] of reference.pages) assert.equal(fs.readFileSync(path.join(committed, filename), "utf8").replace(/\r\n/g, "\n"), text, `Regenerate stale reference: ${filename}`);
 	for (const entry of reference.inventory) for (const member of entry.members) assert.ok(reference.pages.get(entry.module + ".md")!.includes(member.signature), `${entry.name}.${member.key}`);
 }));

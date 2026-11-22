@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { it, mock } from "node:test";
+import { directoryLinkType, fileSymlinkUnavailable, tryFileSymlink } from "./helpers/filesystem-links.ts";
 import { installPluginLocal } from "../scripts/install-plugin-local.mjs";
 import { parsePluginManifest } from "../src/core/plugins.ts";
 
@@ -82,30 +83,32 @@ it("checks portable manifest structural rules against the host contract", () => 
 		installPluginLocal({ project, pluginsDirectory: directory });
 	}
 }));
-it("refuses non-distributable contents, file and directory symlinks, including manifest and root links", () => {
-	for (const mode of ["data", "nested-data", "credentials", "manifest-link", "asset-link", "asset-parent-link", "dist-link", "project-link", "directory-link"]) fixture(({ root, project, directory, installed, write }) => {
+for (const mode of ["data", "nested-data", "credentials", "manifest-link", "asset-link", "asset-parent-link", "dist-link", "project-link", "directory-link"]) {
+	it(`refuses non-distributable content or source links: ${mode}`, t => fixture(({ root, project, directory, installed, write }) => {
 		if (mode === "data") write("source project/dist/data/private.json", "private");
 		if (mode === "nested-data") write("source project/dist/assets/data/private.json", "private");
 		if (mode === "credentials") write("source project/dist/assets/.env.local", "private");
 		if (["manifest-link", "asset-link", "asset-parent-link", "dist-link"].includes(mode)) {
 			const entry = mode === "manifest-link" ? "manifest.json" : mode === "asset-link" ? "assets/chunk.js" : mode === "asset-parent-link" ? "assets" : "";
 			const source = path.join(project, "dist", entry), target = path.join(root, "external");
-			fs.renameSync(source, target); fs.symlinkSync(target, source, fs.statSync(target).isDirectory() ? "dir" : "file");
+			fs.renameSync(source, target);
+			if (fs.statSync(target).isDirectory()) fs.symlinkSync(target, source, directoryLinkType);
+			else if (!tryFileSymlink(target, source)) return t.skip(fileSymlinkUnavailable);
 		}
 		let source = project, target = directory;
-		if (mode === "project-link") { source = path.join(root, "project-link"); fs.symlinkSync(project, source, "dir"); }
-		if (mode === "directory-link") { target = path.join(root, "directory-link"); fs.symlinkSync(directory, target, "dir"); }
+		if (mode === "project-link") { source = path.join(root, "project-link"); fs.symlinkSync(project, source, directoryLinkType); }
+		if (mode === "directory-link") { target = path.join(root, "directory-link"); fs.symlinkSync(directory, target, directoryLinkType); }
 		assert.throws(() => installPluginLocal({ project: source, pluginsDirectory: target }), /Refusing/);
 		unchanged(installed);
-	});
-});
+	}));
+}
 it("refuses linked target plugin/dist and misplaced target dist/data, even dangling links", () => {
 	for (const mode of ["plugin", "dist", "data", "dangling-data"]) fixture(({ root, project, directory, installed }) => {
 		const source = mode === "plugin" ? installed : mode === "dist" ? path.join(installed, "dist") : path.join(installed, "dist/data");
 		const external = path.join(root, "external");
-		if (mode === "plugin" || mode === "dist") { fs.renameSync(source, external); fs.symlinkSync(external, source, "dir"); }
+		if (mode === "plugin" || mode === "dist") { fs.renameSync(source, external); fs.symlinkSync(external, source, directoryLinkType); }
 		else if (mode === "data") fs.mkdirSync(source);
-		else fs.symlinkSync(external, source, "dir");
+		else fs.symlinkSync(external, source, directoryLinkType);
 		assert.throws(() => installPluginLocal({ project, pluginsDirectory: directory }), /Refusing/);
 		assert.equal(fs.readFileSync(path.join(installed, "dist/main.js"), "utf8"), "old code");
 		assert.equal(fs.readFileSync(path.join(installed, "data/private.json"), "utf8"), "installed data");
@@ -136,17 +139,49 @@ it("if rollback itself fails, retains and reports the previous dist backup rathe
 	assert.equal(fs.readFileSync(path.join(installed, stage, "previous/main.js"), "utf8"), "old code");
 	assert.equal(fs.readFileSync(path.join(installed, "data/private.json"), "utf8"), "installed data");
 }));
-it("the documented npm command builds and installs without a checkout, and build failure prevents installation", () => fixture(({ root, project, directory, installed, write }) => {
-	fs.mkdirSync(path.join(project, "scripts")); fs.copyFileSync(helper, path.join(project, "scripts/install-plugin-local.mjs"));
-	write("source project/package.json", JSON.stringify({ private: true, scripts: { build: 'node -e "process.exit(Number(process.env.FAIL_BUILD || 0))"', "install:local": "npm run build && node scripts/install-plugin-local.mjs" } }));
-	const npm = process.env.npm_execpath;
-	assert.ok(npm, "test must run under npm");
-	const execute = (fail: string) => spawnSync(process.execPath, [npm, "run", "install:local", "--", directory], { cwd: project, encoding: "utf8", env: { ...process.env, HOME: root, FAIL_BUILD: fail } });
-	const failed = execute("1"); assert.equal(failed.status, 1, failed.stderr); unchanged(installed);
-	const success = execute("0"); assert.equal(success.status, 0, success.stderr);
+for (const npmFlags of [[], ["--ignore-scripts"]]) {
+	const command = ["npm", ...npmFlags, "run", "install:local"].join(" ");
+	it(`${command} builds before installing into a path with spaces`, () => fixture(({ root, project, directory, installed, write }) => {
+		fs.mkdirSync(path.join(project, "scripts"));
+		fs.copyFileSync(helper, path.join(project, "scripts/install-plugin-local.mjs"));
+		write("source project/package.json", JSON.stringify({
+			private: true,
+			scripts: { build: "node build.cjs", "install:local": "node scripts/install-plugin-local.mjs --build" },
+		}));
+		write("source project/build.cjs", [
+			'if (process.env.FAIL_BUILD) process.exit(23);',
+			'require("node:fs").writeFileSync("dist/assets/chunk.js", "built asset");',
+		].join("\n"));
+		const npm = process.env.npm_execpath;
+		assert.ok(npm, "test must run under npm");
+		const execute = (fail: string) => spawnSync(process.execPath, [npm, ...npmFlags, "run", "install:local", "--", directory], {
+			cwd: project,
+			encoding: "utf8",
+			env: { ...process.env, npm_config_userconfig: path.join(root, ".npmrc"), FAIL_BUILD: fail },
+		});
+		const failed = execute("1");
+		assert.equal(failed.status, 23, failed.stderr);
+		unchanged(installed);
+		const success = execute("");
+		assert.equal(success.status, 0, success.stderr);
+		assert.match(success.stdout, /Installed:/);
+		assert.equal(fs.readFileSync(path.join(installed, "dist/assets/chunk.js"), "utf8"), "built asset");
+		assert.equal(fs.readFileSync(path.join(installed, "data/private.json"), "utf8"), "installed data");
+	}));
+}
+
+it("the direct command installs an existing build without npm", () => fixture(({ project, directory, installed }) => {
+	const execute = (args: string[]) => spawnSync(process.execPath, [helper, ...args], {
+		cwd: project,
+		encoding: "utf8",
+		env: { ...process.env, npm_execpath: "" },
+	});
+	const missing = execute([]);
+	assert.equal(missing.status, 1);
+	assert.match(missing.stderr, /Usage:/);
+	const success = execute([directory]);
+	assert.equal(success.status, 0, success.stderr);
 	assert.match(success.stdout, /Installed:/);
 	assert.equal(fs.readFileSync(path.join(installed, "dist/assets/chunk.js"), "utf8"), "new asset");
 	assert.equal(fs.readFileSync(path.join(installed, "data/private.json"), "utf8"), "installed data");
-	const missing = spawnSync(process.execPath, [helper], { cwd: project, encoding: "utf8" });
-	assert.equal(missing.status, 1); assert.match(missing.stderr, /Usage:/);
 }));

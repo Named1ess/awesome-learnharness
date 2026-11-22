@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { buildCorePlugins, validateCorePackages } from "../scripts/build-core-plugins.mjs";
+import { fileSymlinkUnavailable, tryFileSymlink } from "./helpers/filesystem-links.ts";
 
 function fixture(run: (root: string, calls: string[]) => void) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-core-build-"));
@@ -47,15 +48,22 @@ test("failed builds/validation leave the previous staged tree intact", () => fix
 	assert.equal(fs.readFileSync(path.join(out, "previous"), "utf8"), "keep");
 }));
 
-test("staging rejects data, credentials, source/tooling and symlinks instead of copying them", () => {
-	for (const entry of ["data/private.json", "auth.json", ".env", "tests/test.js", "node_modules/x/index.js", "src/main.ts", "linked"]) fixture(root => {
+test("staging rejects data, credentials and source/tooling instead of copying them", () => {
+	for (const entry of ["data/private.json", "auth.json", ".env", "tests/test.js", "node_modules/x/index.js", "src/main.ts"]) fixture(root => {
 		const code = path.join(root, "plugins", "one", "dist"); const file = path.join(code, entry);
 		fs.mkdirSync(path.dirname(file), { recursive: true });
-		if (entry === "linked") fs.symlinkSync(path.join(code, "main.js"), file); else fs.writeFileSync(file, "private");
+		fs.writeFileSync(file, "private");
 		assert.throws(() => buildCorePlugins(root, { run() {} }), /Unsafe|Refusing/);
 		assert.equal(fs.existsSync(path.join(root, "core-plugins")), false);
 	});
 });
+
+test("staging rejects file symlinks instead of copying them", t => fixture(root => {
+	const code = path.join(root, "plugins", "one", "dist");
+	if (!tryFileSymlink(path.join(code, "main.js"), path.join(code, "linked"))) return t.skip(fileSymlinkUnavailable);
+	assert.throws(() => buildCorePlugins(root, { run() {} }), /Unsafe|Refusing/);
+	assert.equal(fs.existsSync(path.join(root, "core-plugins")), false);
+}));
 
 test("payload validation requires the exact catalog and compatible manifests", () => fixture(root => {
 	buildCorePlugins(root, { run() {} }); const out = path.join(root, "core-plugins");
@@ -69,5 +77,7 @@ test("all supported development/build entry points stage core packages", () => {
 	assert.equal(pkg.scripts["plugins:build-core"], "node scripts/build-core-plugins.mjs");
 	assert.equal(pkg.scripts["plugins:build-authoring"], "node scripts/build-plugin-authoring.mjs");
 	for (const command of ["dev", "build"]) assert.match(pkg.scripts[command], /npm run plugins:build-core && npm run plugins:build-authoring && next /);
-	assert.match(pkg.scripts["desktop:dev"], /npm run dev/); assert.match(pkg.scripts["desktop:dist"], /npm run build/);
+	assert.equal(pkg.scripts["desktop:dev"], "node scripts/desktop-dev.mjs");
+	assert.match(fs.readFileSync(new URL("../scripts/desktop-dev.mjs", import.meta.url), "utf8"), /"npm run dev"/);
+	assert.match(pkg.scripts["desktop:dist"], /npm run build/);
 });

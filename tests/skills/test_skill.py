@@ -64,6 +64,7 @@ class SkillFolderTest(unittest.TestCase):
             env = dict(os.environ)
             env.pop("PYTHONDONTWRITEBYTECODE", None)
             env.pop("PYTHONPATH", None)
+            env["PYTHONIOENCODING"] = "ascii"
             commands = [
                 ("sessions.py", ["list"]),
                 ("sessions.py", ["read", "chat_mv27rrra_feff23b6"]),
@@ -91,6 +92,16 @@ class SkillFolderTest(unittest.TestCase):
                             self.assertEqual(result["data_dir"], str(data.resolve()))
                         else:
                             self.assertIn(str(data.resolve()), completed.stdout)
+            missing_data = base / "missing-café"
+            for filename in ("sessions.py", "graph.py"):
+                with self.subTest(script=filename, stream="stderr"):
+                    command = "list" if filename == "sessions.py" else "sessions"
+                    completed = subprocess.run(
+                        [sys.executable, str(skill / "scripts" / filename), "--data-dir", str(missing_data), command],
+                        cwd=elsewhere, env=env, capture_output=True, encoding="utf-8", timeout=30,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn(str(missing_data.resolve()), completed.stderr)
             self.assertEqual(snapshot(skill), before_skill)
             self.assertEqual(snapshot(data), before_data)
             self.assertEqual(list(elsewhere.iterdir()), [])

@@ -8,6 +8,7 @@ import { createCanvas } from "@napi-rs/canvas";
 import { createFauxCore } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ChatStore, JobStore } from "../src/core/ports.ts";
+import { directoryLinkType, fileSymlinkUnavailable, tryFileSymlink } from "./helpers/filesystem-links.ts";
 
 // Set this test process's locations BEFORE importing config/agent modules.
 // Never read or modify the developer's actual home, keys or learning data.
@@ -31,7 +32,7 @@ async function write(relative: string, body = "LH_SYNTHETIC_SECRET_MARKER\n"): P
 	return file;
 }
 async function link(target: string, alias: string, directory = false): Promise<void> {
-	await fs.symlink(target, alias, directory ? (process.platform === "win32" ? "junction" : "dir") : "file");
+	await fs.symlink(target, alias, directory ? directoryLinkType : "file");
 }
 
 await write("home/notes/topic.md", "ordinary study notes\n");
@@ -48,11 +49,16 @@ const authTemp = await write(`keyfiles/custom-keys.json.tmp-${uuid}`);
 for (const name of ["chatgpt", "github-copilot", "xai"]) await write(`keyfiles/${name}-credentials.json.${uuid}.tmp`);
 const targetKey = await write("relocated-token");
 await link(path.join(root, "keyfiles"), path.join(root, "private"), true);
-await link(targetKey, auth);
+const fileSymlinks = tryFileSymlink(targetKey, auth);
+if (fileSymlinks) {
+	await link(targetKey, path.join(home, "notes", "key-alias"));
+	await link(authTemp, path.join(home, "notes", "key-temp-alias"));
+} else {
+	await fs.unlink(targetKey);
+	await write("keyfiles/custom-keys.json");
+}
 await link(path.join(root, "transcripts"), path.join(home, ".claude"), true);
 await link(path.join(home, ".ssh"), path.join(home, "notes", "keys"), true);
-await link(targetKey, path.join(home, "notes", "key-alias"));
-await link(authTemp, path.join(home, "notes", "key-temp-alias"));
 await link(home, path.join(root, "home-alias"), true);
 await link(home, path.join(root, "home-alias-2"), true);
 await write("keyfiles/data/chats/session.json", "synthetic learning conversation\n");
@@ -82,8 +88,7 @@ const denied = /Access denied: .* is a protected location/;
 
 describe("source access: configured credentials only", () => {
 	const protectedFiles = [
-		auth, targetKey, path.join(home, "notes", "key-alias"),
-		authTemp, `${auth}.tmp-${uuid}`, path.join(home, "notes", "key-temp-alias"),
+		auth, authTemp, `${auth}.tmp-${uuid}`,
 		...(["chatgpt", "github-copilot", "xai"].flatMap((name) => [
 			path.join(root, "private", `${name}-credentials.json`),
 			path.join(root, "keyfiles", `${name}-credentials.json`),
@@ -92,8 +97,9 @@ describe("source access: configured credentials only", () => {
 		])),
 		path.join(root, "private", ".auth.json.tmp-123"), path.join(root, "keyfiles", ".auth.json.tmp-123"),
 	];
-	for (const file of protectedFiles) {
-		it(`refuses read and direct grep of ${path.relative(root, file)}`, async () => {
+	const fileLinkPaths = [targetKey, path.join(home, "notes", "key-alias"), path.join(home, "notes", "key-temp-alias")];
+	for (const file of [...protectedFiles, ...fileLinkPaths]) {
+		it(`refuses read and direct grep of ${path.relative(root, file)}`, { skip: !fileSymlinks && fileLinkPaths.includes(file) ? fileSymlinkUnavailable : false }, async () => {
 			await assert.rejects(readTool.execute!("s", { path: file }), denied);
 			await assert.rejects(grepTool.execute!("s", { path: file, pattern: "LH_SYNTHETIC_SECRET_MARKER" }), denied);
 		});
@@ -113,6 +119,8 @@ describe("source access: configured credentials only", () => {
 		const found = await text(findTool, { path: root, pattern: "*" });
 		assert.match(found, /data\/chats\/session\.json/);
 		assert.doesNotMatch(found, /relocated-token|credentials\.json|\.auth\.json\.tmp|transcripts\/|id_ed25519|elsewhere\/\.env/i);
+		assert.ok(!found.split("\n").includes("keyfiles/custom-keys.json"));
+		assert.ok(!found.split("\n").includes("private/custom-keys.json"));
 		assert.ok(!found.split("\n").includes(`keyfiles/custom-keys.json.tmp-${uuid}`));
 	});
 
@@ -182,21 +190,26 @@ describe("source access: canonical roots and all tool paths", () => {
 		}
 	});
 
-	it("uses the checked target for an ordinary file alias, and preserves missing-file errors", async () => {
+	it("uses the checked target for an ordinary file alias", async t => {
 		const alias = path.join(home, "notes", "topic-alias");
-		await link(path.join(home, "notes", "topic.md"), alias);
+		if (!tryFileSymlink(path.join(home, "notes", "topic.md"), alias)) return t.skip(fileSymlinkUnavailable);
 		assert.equal(resolveSourcePath(alias), path.join(home, "notes", "topic.md"));
 		assert.match(await text(readTool, { path: alias }), /ordinary study notes/);
+	});
+
+	it("preserves missing-file errors for ordinary paths and denials under protected directories", async () => {
 		await assert.rejects(readTool.execute!("s", { path: "notes/absent" }), /ENOENT/);
 		await assert.rejects(readTool.execute!("s", { path: "notes/keys/absent" }), denied);
 	});
 
 	for (const name of [".env", ".env.example", ".env.template", ".ENV.production"]) {
-		it(`denies ${name} outside home, including through a differently named alias`, async () => {
+		it(`denies ${name} outside home`, async () => {
+			await assert.rejects(readTool.execute!("s", { path: path.join(root, "elsewhere", name) }), denied);
+		});
+		it(`denies ${name} through a differently named file alias`, async t => {
 			const file = path.join(root, "elsewhere", name);
 			const alias = path.join(home, "notes", `alias-${name}`);
-			await link(file, alias);
-			await assert.rejects(readTool.execute!("s", { path: file }), denied);
+			if (!tryFileSymlink(file, alias)) return t.skip(fileSymlinkUnavailable);
 			await assert.rejects(readTool.execute!("s", { path: alias }), denied);
 		});
 	}
@@ -318,11 +331,11 @@ describe("source access: credential case aliases on the fixture filesystem", () 
 			path.join(root, "keyfiles", "CHATGPT-CREDENTIALS.JSON"),
 			path.join(root, "KEYFILES", "github-copilot-credentials.json"),
 			path.join(root, "KEYFILES", "XAI-CREDENTIALS.JSON"),
-			path.join(root, "RELOCATED-TOKEN"),
 			path.join(root, "KEYFILES", ".auth.json.tmp-123"),
 			path.join(root, "KEYFILES", `chatgpt-credentials.json.${uuid}.tmp`),
 			path.join(root, "KEYFILES", `CUSTOM-KEYS.JSON.tmp-${uuid}`),
 		];
+		if (fileSymlinks) aliases.push(path.join(root, "RELOCATED-TOKEN"));
 		for (const alias of aliases) {
 			if (process.platform === "darwin") {
 				const original = path.join(root, path.relative(root, alias).toLowerCase());
@@ -341,8 +354,10 @@ describe("source access: credential case aliases on the fixture filesystem", () 
 
 	it("protects a non-symlink configured AUTH_FILE regardless of filename or parent-directory case", async (t) => {
 		if (!await caseAliasesAvailable()) return t.skip("fixture filesystem is case-sensitive");
-		await fs.unlink(auth);
-		await fs.writeFile(auth, "LH_SYNTHETIC_SECRET_MARKER\n");
+		if (fileSymlinks) {
+			await fs.unlink(auth);
+			await fs.writeFile(auth, "LH_SYNTHETIC_SECRET_MARKER\n");
+		}
 		try {
 			for (const alias of [path.join(root, "keyfiles", "CUSTOM-KEYS.JSON"), path.join(root, "KEYFILES", "custom-keys.json")]) {
 				await assert.rejects(readTool.execute!("case-auth", { path: alias }), denied);
@@ -351,8 +366,10 @@ describe("source access: credential case aliases on the fixture filesystem", () 
 				assert.match(pdf.brief, /^PDF failed: Access denied:/);
 			}
 		} finally {
-			await fs.unlink(auth);
-			await link(targetKey, auth);
+			if (fileSymlinks) {
+				await fs.unlink(auth);
+				await link(targetKey, auth);
+			}
 		}
 	});
 });

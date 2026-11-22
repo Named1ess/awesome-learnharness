@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, beforeEach, describe, it } from "node:test";
+import { directoryLinkType, fileSymlinkUnavailable, tryFileSymlink } from "./helpers/filesystem-links.ts";
 
 // Every store, route and composition-root import sees only these synthetic
 // locations. No real settings, credential files or learning records are used.
@@ -86,17 +87,18 @@ describe("strict persisted file-access policy", () => {
 		assert.equal(readFileAccessSettings().ok, false);
 		assert.throws(() => resolveSourcePath(path.join(a, "notes.md")), blocked);
 	});
-	it("directories, dangling settings symlinks and dangling data-directory symlinks are not first boot", async () => {
+	it("directories and dangling data-directory links are not first boot", async () => {
 		await fs.mkdir(SETTINGS_FILE);
 		assert.equal(readFileAccessSettings().ok, false);
 		await fs.rmdir(SETTINGS_FILE);
-		await fs.symlink(path.join(root, "missing-settings.json"), SETTINGS_FILE, "file");
-		assert.equal(readFileAccessSettings().ok, false);
-		await fs.unlink(SETTINGS_FILE);
 		await fs.rmdir(data);
-		await fs.symlink(path.join(root, "missing-data"), data, process.platform === "win32" ? "junction" : "dir");
+		await fs.symlink(path.join(root, "missing-data"), data, directoryLinkType);
 		try { assert.equal(readFileAccessSettings().ok, false); }
 		finally { await fs.unlink(data); await fs.mkdir(data); }
+	});
+	it("dangling settings file symlinks are not first boot", t => {
+		if (!tryFileSymlink(path.join(root, "missing-settings.json"), SETTINGS_FILE)) return t.skip(fileSymlinkUnavailable);
+		assert.equal(readFileAccessSettings().ok, false);
 	});
 });
 

@@ -16,7 +16,7 @@ import { execFileSync } from "node:child_process";
 import { describe, it } from "node:test";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..");
-const TSX_LOADER = path.join(REPO_ROOT, "node_modules", "tsx", "dist", "loader.mjs");
+const CONFIG_URL = new URL("../config.ts", import.meta.url).href;
 
 describe("LH_DATA_DIR seam", () => {
 	it("relocates data/chats/graph under LH_DATA_DIR, keeps prompts ROOT-anchored", async () => {
@@ -38,10 +38,12 @@ describe("LH_DATA_DIR seam", () => {
 	});
 
 	it("unset = the repo data/ exactly as before (fresh child process, no env)", () => {
+		const env = { ...process.env };
+		delete env.LH_DATA_DIR;
 		const out = execFileSync(
 			process.execPath,
-			["--import", TSX_LOADER, "--eval", `const m = await import(${JSON.stringify(path.join(REPO_ROOT, "config.ts"))}); console.log(JSON.stringify({ data: m.PATHS.data, chats: m.PATHS.chats }));`],
-			{ cwd: REPO_ROOT, encoding: "utf-8" },
+			["--import", "tsx", "--eval", `const m = await import(${JSON.stringify(CONFIG_URL)}); console.log(JSON.stringify({ data: m.PATHS.data, chats: m.PATHS.chats }));`],
+			{ cwd: REPO_ROOT, env, encoding: "utf-8" },
 		);
 		const parsed = JSON.parse(out) as { data: string; chats: string | null };
 		assert.equal(parsed.data, path.join(REPO_ROOT, "data"));

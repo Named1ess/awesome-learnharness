@@ -756,7 +756,7 @@ test("cwd is an empty temp dir; prompt and mcp config live in a separate private
 	assert.ok(!privateDir.startsWith(call.cwd + sep));
 	assert.equal(dirname(getFlagValue(call.args, "--mcp-config")), privateDir);
 	assert.equal(call.systemPrompt, "You are a tutor.");
-	assert.equal(call.mcpConfigMode, 0o600);
+	if (process.platform !== "win32") assert.equal(call.mcpConfigMode, 0o600);
 
 	const mcpConfig = JSON.parse(call.mcpConfig) as { mcpServers: Record<string, { url: string }> };
 	assert.match(mcpConfig.mcpServers.learnharness?.url ?? "", /^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
@@ -1360,11 +1360,22 @@ test("a late MCP compatibility error cannot restore a cancelled worker continuat
 	t.after(() => worker.close());
 	const parked = await runTurn(worker.streamFn, [HI], { signal: controller.signal });
 	const retired = getOnlyCall(retiring.calls);
+	let terminationRequested = false;
+	if (process.platform === "win32") {
+		// Windows kills the child immediately. Let this fixture survive the first
+		// signal so its late request can reach the bridge before forced cleanup.
+		const kill = retired.child.kill.bind(retired.child);
+		t.mock.method(retired.child, "kill", (signal?: NodeJS.Signals | number) => {
+			if (signal !== undefined && signal !== "SIGTERM") return kill(signal);
+			terminationRequested = true;
+			return true;
+		});
+	}
 	let stderr = "";
 	retired.child.stderr.on("data", chunk => { stderr += String(chunk); });
 	controller.abort();
 	worker.close();
-	assert.equal(retired.child.killed, true, "retirement has signalled the child");
+	assert.equal(terminationRequested || retired.child.killed, true, "retirement has signalled the child");
 	retired.child.send("send late incompatible call");
 	await assertCleanedUp(retired);
 	assert.match(stderr, /compatibility error: MCP calls must include a unique claudecode\/toolUseId/,
@@ -1394,11 +1405,11 @@ test("output after MCP admission fails continuation instead of silently replayin
 	await assertCleanedUp(getOnlyCall(calls));
 });
 
-test("normal completion escalates termination when the child ignores SIGTERM", async (t) => {
+test("normal completion stops the child, escalating past SIGTERM on POSIX", async (t) => {
 	const { events, calls } = await runScenario(t, [JSON.stringify({ fake: "ignore-term" }), ...readFixtureLines("text.jsonl"), HOLD]);
 	assert.equal(getLastEvent(events).type, "done");
 	await assertCleanedUp(getOnlyCall(calls));
-	assert.equal(getOnlyCall(calls).child.signalCode, "SIGKILL");
+	assert.equal(getOnlyCall(calls).child.signalCode, process.platform === "win32" ? "SIGTERM" : "SIGKILL");
 });
 
 for (const asyncVersionFailure of [false, true]) test(`${asyncVersionFailure ? "an asynchronous version-check" : "a synchronous spawn"} failure removes both temp directories and the bridge`, async () => {

@@ -55,6 +55,9 @@ function nativeCatalogFor(model: { provider: string; id: string }): ModelCatalog
 	};
 }
 
+// Resolve the temporary directory before closed() replaces the environment.
+const testTempDirectory = tmpdir();
+
 // Whole-process replacement isolates native auth/profile discovery; fetch never
 // delegates. No real credentials, .env, OAuth accounts, or model inference.
 async function closed<T>(run: () => Promise<T>): Promise<T> {
@@ -192,7 +195,7 @@ describe("native app and conversation identity", { concurrency: false }, () => {
 		["custom", "deepseek-v4.1-flash", "/inference/go/openai/v1/chat/completions"],
 	] as const) {
 		it(`one-shot ${provider}/${id} calls carry private routing ids with caching off`, async () => closed(async () => {
-			const directory = mkdtempSync(path.join(tmpdir(), "lh-plugin-oneshot-session-"));
+			const directory = mkdtempSync(path.join(testTempDirectory, "lh-plugin-oneshot-session-"));
 			const controller = new AbortController();
 			if (provider === "custom") piModels().setProvider(buildOpenAiCompatibleProvider({ baseUrl: "https://opencode.ai/inference/go/openai/v1", models: [{ id }] }));
 			try {
@@ -227,7 +230,7 @@ describe("native app and conversation identity", { concurrency: false }, () => {
 	}
 
 	it("one-shot routing identity stays stable across a native transport retry", async () => closed(async () => {
-		const directory = mkdtempSync(path.join(tmpdir(), "lh-plugin-oneshot-retry-"));
+		const directory = mkdtempSync(path.join(testTempDirectory, "lh-plugin-oneshot-retry-"));
 		const controller = new AbortController();
 		try {
 			const pin = { provider: "opencode-go", id: "glm-5.3", thinkingLevel: "off" as const };
@@ -340,7 +343,7 @@ describe("native app and conversation identity", { concurrency: false }, () => {
 		["glm-5.3", "off", undefined],
 		["deepseek-v4.1-flash", "high", "none"],
 	] as const) it(`plugin workers keep isolated ${id} sessions across tool rounds (cache ${cacheRetention ?? "default"})`, async () => closed(async () => {
-		const directory = mkdtempSync(path.join(tmpdir(), "lh-plugin-worker-session-"));
+		const directory = mkdtempSync(path.join(testTempDirectory, "lh-plugin-worker-session-"));
 		const signal = new AbortController();
 		const pin = { provider: "opencode-go", id, thinkingLevel };
 		const catalog = nativeCatalogFor(pin);
@@ -402,7 +405,7 @@ describe("native app and conversation identity", { concurrency: false }, () => {
 
 	for (const [provider, id] of [["openrouter", "openrouter/free"], ["openai", "gpt-4o-mini"]] as const) {
 		it(`managed ${provider} requests preserve native session affinity and caching`, async () => closed(async () => {
-			const directory = mkdtempSync(path.join(tmpdir(), "lh-plugin-native-session-"));
+			const directory = mkdtempSync(path.join(testTempDirectory, "lh-plugin-native-session-"));
 			const controller = new AbortController();
 			try {
 				const pin = { provider, id, thinkingLevel: "off" as const };

@@ -1,6 +1,7 @@
 /** Copy a built community package into an explicit plugins directory.
- * Portable: Node built-ins only. Run the project's build before this helper.
+ * Portable: Node built-ins only. The npm entry point can build the project first.
  * The host, not this helper, decides app compatibility and plugin enablement. */
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -114,11 +115,28 @@ export function installPluginLocal({ project = process.cwd(), pluginsDirectory }
 	}
 }
 
+function runCli(args) {
+	const buildFirst = args[0] === "--build";
+	const destination = buildFirst ? args.slice(1) : args;
+	if (destination.length !== 1 || !destination[0].trim()) {
+		throw Error('Usage: node scripts/install-plugin-local.mjs [--build] "<plugins-directory>" (use --build through npm run install:local)');
+	}
+	if (buildFirst) {
+		const npm = process.env.npm_execpath;
+		if (!npm) throw Error("Run --build through npm run install:local.");
+		const build = spawnSync(process.execPath, [npm, "run", "build"], { cwd: process.cwd(), stdio: "inherit" });
+		if (build.error) throw build.error;
+		if (build.signal) throw Error(`Build interrupted by ${build.signal}`);
+		if (build.status !== 0) return build.status ?? 1;
+	}
+
+	const result = installPluginLocal({ pluginsDirectory: destination[0] });
+	console.log(`[plugin-install] ${result.copied ? "Installed" : "Already built in place"}: ${result.directory}`);
+	console.log("Refresh Community plugins and enable new plugins. Restart LearnHarness to load changes to already-loaded code.");
+	return 0;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-	try {
-		if (process.argv.length !== 3 || !process.argv[2].trim()) throw Error('Usage: node scripts/install-plugin-local.mjs "<plugins-directory>" (run after building)');
-		const result = installPluginLocal({ pluginsDirectory: process.argv[2] });
-		console.log(`[plugin-install] ${result.copied ? "Installed" : "Already built in place"}: ${result.directory}`);
-		console.log("Refresh Community plugins and enable new plugins. Restart LearnHarness to load changes to already-loaded code.");
-	} catch (error) { console.error("[plugin-install]", error.message); process.exitCode = 1; }
+	try { process.exitCode = runCli(process.argv.slice(2)); }
+	catch (error) { console.error("[plugin-install]", error.message); process.exitCode = 1; }
 }

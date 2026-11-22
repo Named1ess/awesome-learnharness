@@ -316,12 +316,12 @@ class GraphTests(unittest.TestCase):
         before = snapshot(self.root)
         caches_before = set(SCRIPTS.rglob("*.pyc"))
         command = [sys.executable, str(SCRIPTS / "graph.py")]
-        completed = subprocess.run([*command, "--data-dir", str(self.root), "--format", "json", "sessions"], env=env, capture_output=True, text=True, check=False)
+        completed = subprocess.run([*command, "--data-dir", str(self.root), "--format", "json", "sessions"], env=env, capture_output=True, encoding="utf-8", check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout), {"data_dir": str(self.root.resolve()), "records": []})  # Never falls back to repo/LH_DATA_DIR.
-        bad = subprocess.run([*command, "sessions", "--data-dir", str(self.root)], env=env, capture_output=True, text=True, check=False)
+        bad = subprocess.run([*command, "sessions", "--data-dir", str(self.root)], env=env, capture_output=True, encoding="utf-8", check=False)
         self.assertNotEqual(bad.returncode, 0)
-        absent = subprocess.run([*command, "--data-dir", str(self.root / "missing"), "sessions"], env=env, capture_output=True, text=True, check=False)
+        absent = subprocess.run([*command, "--data-dir", str(self.root / "missing"), "sessions"], env=env, capture_output=True, encoding="utf-8", check=False)
         self.assertNotEqual(absent.returncode, 0)
         self.assertEqual(absent.stdout, "")
         self.assertEqual(snapshot(self.root), before)

@@ -14,6 +14,7 @@ import { jobTools } from "../src/agent/tools/jobs.ts";
 import { GET } from "../app/api/chats/[id]/images/[snapshotId]/route.ts";
 import type { JobRecord, ShowImageDetails } from "../src/core/contracts.ts";
 import type { JobStore } from "../src/core/ports.ts";
+import { directoryLinkType } from "./helpers/filesystem-links.ts";
 
 const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "lh-image-snapshots-"));
 const chats: string[] = [];
@@ -160,15 +161,18 @@ describe("learner image source safety", () => {
 		const home = await fs.mkdtemp(path.join(scratch, "home-"));
 		await fs.mkdir(path.join(home, ".claude"));
 		await fs.writeFile(path.join(home, ".claude", "private.png"), picture());
-		await fs.symlink(path.join(home, ".claude"), path.join(home, "alias"));
-		const old = process.env.HOME;
+		await fs.symlink(path.join(home, ".claude"), path.join(home, "alias"), directoryLinkType);
+		const { HOME: previousHome, USERPROFILE: previousUserProfile } = process.env;
 		try {
-			process.env.HOME = home;
+			process.env.HOME = process.env.USERPROFILE = home;
 			const tool = createShowImageTool({ chatId: "never-written", chatStore: { saveImageSnapshot: () => assert.fail("must not save denied image") } });
 			await assert.rejects(tool.execute("denied", { path: "alias/private.png" }), /Access denied/);
 			const tools = jobTools({ chatId: "x", jobStore: { findJobByToolCallId: () => undefined } as unknown as JobStore, spawn: () => assert.fail("must not spawn") });
 			await assert.rejects(tools.visual!.execute("denied", { brief: "mark it", image: "alias/private.png" }), /Access denied/);
-		} finally { if (old === undefined) delete process.env.HOME; else process.env.HOME = old; }
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+			if (previousUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousUserProfile;
+		}
 	});
 
 	it("keeps visual dispatch idempotent if the source disappears after the first call", async () => {
