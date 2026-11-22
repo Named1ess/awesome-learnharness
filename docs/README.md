@@ -8,6 +8,7 @@
 - [Custom and local models](custom-providers.md) — configure an OpenAI-compatible endpoint.
 - [Context, caching, and costs](compaction-accounting.md) — understand the session meters and advanced cache preferences.
 - [Learning-data skill](../skills/learnharness/SKILL.md) — a read-only guide and standalone readers for local learning records.
+- [Local MCP server](mcp.md) — connect Codex or Claude to sessions and the knowledge graph.
 
 ## Development and maintenance
 

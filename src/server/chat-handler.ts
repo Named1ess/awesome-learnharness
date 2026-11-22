@@ -55,7 +55,7 @@ import { sideChats, type SideChatService } from "./side-chat.ts";
 import { SIDE_CONTEXT_BUDGET_ERROR, sideBudgetRetryDrops, sideContextWindow } from "./side-context-budget.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
-import { hasProbeDone, hasUnresolvedQuestion, pendingPluginQuestionOf, pluginQuestionCallsOf, questionCallsOf } from "../core/native-messages.ts";
+import { activeProblemOf, hasProbeDone, hasUnresolvedQuestion, pendingPluginQuestionOf, pluginQuestionCallsOf, questionCallsOf } from "../core/native-messages.ts";
 import { samePluginQuestionOccurrence } from "../core/plugin-questions.ts";
 import { composeInstructions } from "../agent/teacher-agent.ts";
 import { ensureCompacted, kickCompaction, effectiveThresholdTokens, projectedContextTokens, compactionInFlight } from "./compaction.ts";
@@ -180,10 +180,12 @@ setJobRespawn((jobId) => void jobRunner.runJob(jobId));
 // tools read it fresh per call (allowed folders + the app's private paths).
 setFileAccessPolicy(fileAccessPolicy);
 
+type BuildTeachingAgent = (opts: AgentBuildOptions & { teaching: boolean }) => TeachingAgent;
+
 /** The route-facing entry: parse {chatId, input} and run one turn. */
 export async function handleChatRequest(
 	req: Request,
-	buildAgent?: (opts: AgentBuildOptions & { teaching: boolean }) => TeachingAgent,
+	buildAgent?: BuildTeachingAgent,
 	sideContext: Pick<SideChatService, "snapshot"> = sideChats,
 ): Promise<Response> {
 	let body: { chatId?: unknown; input?: unknown };
@@ -214,15 +216,48 @@ export async function handleChatRequest(
 export async function handleChatInput(
 	chatId: string,
 	input: TurnInput,
-	buildAgent?: (opts: AgentBuildOptions & { teaching: boolean }) => TeachingAgent,
+	buildAgent?: BuildTeachingAgent,
 	sideContext: Pick<SideChatService, "snapshot"> = sideChats,
 ): Promise<Response> {
-	await reconcilePluginQuestionCompatibility(stores.chatStore, chatId);
+	return runChatInput(chatId, input, buildAgent, sideContext);
+}
+
+/** A validated, formatted attachment is a foreground learner message. */
+export async function handleMcpAttachment(chatId: string, text: string, buildAgent?: BuildTeachingAgent): Promise<Response> {
+	return runChatInput(chatId, { type: "text", text }, buildAgent, sideChats, true);
+}
+
+function mcpAttachmentConflict(chatId: string, messages: readonly LhMessage[]): Response | undefined {
+	if (isTurnRunning(chatId) || compactionInFlight(chatId)) {
+		return Response.json({ error: "A turn is already running for this session" }, { status: 409 });
+	}
+	if (hasUnresolvedQuestion(messages)) {
+		return Response.json({ error: "Answer or dismiss the pending question before attaching files" }, { status: 409 });
+	}
+	if (activeProblemOf(messages)) {
+		return Response.json({ error: "Finish or dismiss the active practice problem before attaching files" }, { status: 409 });
+	}
+}
+
+async function runChatInput(
+	chatId: string,
+	input: TurnInput,
+	buildAgent: BuildTeachingAgent | undefined,
+	sideContext: Pick<SideChatService, "snapshot">,
+	mcpAttachment = false,
+): Promise<Response> {
+	// The attachment entry must leave a blocked session untouched. In the
+	// UI path, compatibility reconciliation may itself dismiss a question.
+	if (!mcpAttachment) await reconcilePluginQuestionCompatibility(stores.chatStore, chatId);
 	const initialRecord = stores.chatStore.getChat(chatId);
 	if (!initialRecord) {
 		return Response.json({ error: "Unknown chat" }, { status: 404 });
 	}
 	let record = initialRecord;
+	if (mcpAttachment) {
+		const conflict = mcpAttachmentConflict(chatId, record.messages);
+		if (conflict) return conflict;
+	}
 
 	const capturedSession = { createdAt: record.createdAt, kind: record.kind };
 	const freshSubmission = input.type === "text" || input.type === "thinking" || input.type === "answer" || input.type === "plugin-question-answer" || input.type === "plugin-problem-submission";
@@ -383,6 +418,14 @@ export async function handleChatInput(
 	};
 	const sideBudgetError = () => new Error(SIDE_CONTEXT_BUDGET_ERROR);
 	const beforeCompaction = record.messages;
+	if (mcpAttachment) {
+		const current = stores.chatStore.getChat(chatId);
+		if (!current) return Response.json({ error: "Unknown chat" }, { status: 404 });
+		// Model preparation can yield to another turn or compaction. Refuse
+		// instead of joining that work through the ordinary structural wait.
+		const conflict = mcpAttachmentConflict(chatId, current.messages);
+		if (conflict) return conflict;
+	}
 	await ensureCompacted(
 		{
 			chatStore: stores.chatStore,
@@ -438,6 +481,10 @@ export async function handleChatInput(
 	const compactedRecord = stores.chatStore.getChat(chatId);
 	if (!compactedRecord) return Response.json({ error: "Unknown chat" }, { status: 404 });
 	record = compactedRecord;
+	if (mcpAttachment) {
+		const conflict = mcpAttachmentConflict(chatId, record.messages);
+		if (conflict) return conflict;
+	}
 	// Final admission seam: every image/preflight await is over. Resolve via
 	// the SAME conversation chain, never a parallel role catalog. No await
 	// may intervene before the save-only write or beginTurn/write below.

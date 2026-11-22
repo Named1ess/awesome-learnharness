@@ -46,3 +46,18 @@ it("all unsafe/mismatched paths are refused before the pipeline or organizationa
 	}
 	assert.equal(calls, 0); assert.deepEqual(stores.sourceOrganizationStore.read(), before);
 });
+
+it("the shared import entry keeps logical path admission and dispatch outside multipart HTTP", async t => {
+	const { importGraphNotes } = await import("../src/server/notes-import.ts");
+	const calls = t.mock.method(extraction, "importNotes", async () => ({ nodes: 1, chains: 0 }));
+	const files = [new File(["synthetic notes"], "chapter.md")];
+	assert.equal((await importGraphNotes(files, ["../chapter.md"])).status, 400);
+	assert.equal(calls.mock.callCount(), 0);
+
+	const response = await importGraphNotes(files, ["Notes/chapter.md"]);
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { results: [{
+		filePath: "Notes/chapter.md", requestIndex: 0, outcome: "completed", ok: true, stats: { nodes: 1, chains: 0 },
+	}] });
+	assert.deepEqual(calls.mock.calls[0]?.arguments, [{ filePath: "Notes/chapter.md", text: "synthetic notes" }]);
+});
