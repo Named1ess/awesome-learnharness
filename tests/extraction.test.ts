@@ -2530,6 +2530,46 @@ describe("notes import completion and retry reliability", () => {
 		return true;
 	};
 
+	it("runs both native notes stages with scoped inference and no app model or key", async () => {
+		const graphStore = memoryLedgers();
+		const roles: string[] = [];
+		const pipeline = createExtractionPipeline({
+			chatStore, graphStore,
+			providerKeyMissing: () => assert.fail("Scoped extraction cannot fall back to app provider keys"),
+			clientInference: () => ({
+				signal: new AbortController().signal,
+				engine(role: string) {
+					roles.push(role);
+					return role === "extractor" ? submitModel("submit_findings", NOTES_FINDINGS) : submitModel("submit_review", NOTES_VERDICT);
+				},
+			}),
+		});
+		assert.deepEqual(await pipeline.importNotes(input), { nodes: 1, chains: 0 });
+		assert.deepEqual(roles, ["extractor", "auditor"]);
+		assert.equal(graphStore.readNodes().length, 1);
+		assert.equal(graphStore.readSources()[0]?.extractions?.length, 1);
+	});
+
+	it("stops native notes chunks on scoped cancellation and preserves committed work", async () => {
+		const graphStore = memoryLedgers();
+		const controller = new AbortController();
+		let extractorCalls = 0;
+		const pipeline = createExtractionPipeline({
+			chatStore, graphStore, getChunkTokens: () => 1,
+			clientInference: () => ({
+				signal: controller.signal,
+				engine: role => role === "auditor"
+					? submitModel("submit_review", NOTES_VERDICT)
+					: submitModel("submit_findings", NOTES_FINDINGS, () => {
+						if (++extractorCalls === 2) controller.abort(new Error("Caller disconnected"));
+					}),
+			}),
+		});
+		await assert.rejects(pipeline.importNotes({ ...input, text: "first chunk\nsecond chunk\nthird chunk" }), incomplete("aborted", 1));
+		assert.equal(extractorCalls, 2);
+		assert.equal(graphStore.readNodes().length, 1);
+	});
+
 	it("failure followed by an unchanged retry really extracts and preserves both usage records", async () => {
 		const ledgers = memoryLedgers();
 		await assert.rejects(make(ledgers, silentModel()).importNotes(input), incomplete("failed", 0));

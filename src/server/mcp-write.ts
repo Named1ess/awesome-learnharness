@@ -7,7 +7,8 @@ import { PATHS } from "../../config.ts";
 import { resolvePolicy, type FileAccessPolicy } from "../agent/tools/file-access.ts";
 import { resolveSourcePath } from "../agent/tools/fs-shared.ts";
 import { parseFilePaths, quoteFilePath } from "../core/file-paths.ts";
-import { isMcpWriteToken, MCP_PROFILE_HEADER, mcpWriteOperationSchema, mcpWriteProfileProof } from "../mcp/write-protocol.ts";
+import { isMcpWriteToken, MCP_PROFILE_HEADER, mcpWriteOperationSchema, mcpWriteProfileProof, type McpWriteOperation } from "../mcp/write-protocol.ts";
+import { MCP_CLIENT_HEADER, MCP_CLIENT_REQUEST_BYTES, mcpClientOperationSchema, type McpClientOperation } from "../mcp/client-protocol.ts";
 import { CustomBodyLimitError, readBoundedJson } from "./custom-provider-body.ts";
 import { browserOnlyMode } from "./desktop-access.ts";
 import { fileAccessPolicy } from "./file-access.ts";
@@ -22,6 +23,7 @@ const FILE_REFUSAL = "The document is unavailable or outside the approved file a
 interface McpWriteDependencies {
 	importGraphNotes(files: File[], paths: FormDataEntryValue[]): Promise<Response>;
 	handleMcpAttachment(sessionId: string, text: string): Promise<Response>;
+	handleMcpClientOperation?(operation: McpClientOperation, fileOperation: () => Promise<Response>, filesDirectory?: string): Promise<Response>;
 	env?: Record<string, string | undefined>;
 	dataDirectory?: string;
 	attachmentPolicy?: () => FileAccessPolicy;
@@ -131,16 +133,31 @@ export async function handleMcpWriteRequest(request: Request, deps: McpWriteDepe
 		return errorResponse("The running LearnHarness profile does not match the MCP request.", 403);
 	}
 
+	const clientReasoning = request.headers.get(MCP_CLIENT_HEADER) === "1";
 	let body: unknown;
-	try { body = await readBoundedJson(request, MAX_BODY_BYTES); }
+	try { body = await readBoundedJson(request, clientReasoning ? MCP_CLIENT_REQUEST_BYTES : MAX_BODY_BYTES); }
 	catch (error) {
 		return error instanceof CustomBodyLimitError
-			? errorResponse("MCP write request exceeds the 16 KiB limit.", 413)
+			? errorResponse(clientReasoning ? "MCP client request exceeds the 256 KiB limit." : "MCP write request exceeds the 16 KiB limit.", 413)
 			: errorResponse("Invalid MCP write JSON.", 400);
 	}
+	if (clientReasoning) {
+		if (!deps.handleMcpClientOperation) return errorResponse("Client-driven inference is unavailable.", 503);
+		const client = mcpClientOperationSchema.safeParse(body);
+		if (!client.success) return errorResponse("Invalid MCP client operation.", 400);
+		const operation = client.data;
+		const root = "request_id" in operation ? await filesRoot(env.LH_MCP_FILES_DIR) : null;
+		return deps.handleMcpClientOperation(operation, () => operation.operation === "import_file" || operation.operation === "attach_file"
+			? executeFileOperation(operation, deps, env)
+			: Promise.resolve(errorResponse("This operation does not take a file.", 400)), root ?? undefined);
+	}
 	const parsed = mcpWriteOperationSchema.safeParse(body);
-	if (!parsed.success || !isRelativeFile(parsed.data.path)) return errorResponse("Invalid MCP write operation or relative file path.", 400);
-	const operation = parsed.data;
+	if (!parsed.success) return errorResponse("Invalid MCP write operation or relative file path.", 400);
+	return executeFileOperation(parsed.data, deps, env);
+}
+
+async function executeFileOperation(operation: McpWriteOperation, deps: McpWriteDependencies, env: Record<string, string | undefined>): Promise<Response> {
+	if (!isRelativeFile(operation.path)) return errorResponse("Invalid MCP write operation or relative file path.", 400);
 	const importing = operation.operation === "import_file";
 	if (importing && !IMPORT_EXTENSIONS.test(operation.path)) return errorResponse(UNSUPPORTED_TYPE_MESSAGE, 400);
 	const root = await filesRoot(env.LH_MCP_FILES_DIR);

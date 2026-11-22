@@ -3,6 +3,7 @@ import { fetch as directFetch } from "undici";
 import { z } from "zod";
 import { createAddressCheckedAgent } from "../agent/tools/safe-fetch.ts";
 import { readBoundedJson } from "../server/custom-provider-body.ts";
+import { MCP_CLIENT_HEADER, MCP_CLIENT_REQUEST_BYTES, type McpClientOperation } from "./client-protocol.ts";
 import { isMcpWriteToken, MCP_PROFILE_HEADER, MCP_RESULT_LIMIT_BYTES, MCP_WRITE_PATH, mcpWriteProfileProof, type McpWriteOperation } from "./write-protocol.ts";
 
 const loopbackOrigin = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?\/?$/i;
@@ -16,6 +17,7 @@ const attachmentResult = z.object({ session_id: z.string(), status: z.literal("a
 const appError = z.looseObject({ error: z.string() });
 
 export type McpWriteClient = (operation: McpWriteOperation, signal: AbortSignal) => Promise<CallToolResult>;
+export type McpClientWriteClient = (operation: McpClientOperation, signal: AbortSignal) => Promise<CallToolResult>;
 
 function appEndpoint(origin: string): URL {
 	const url = URL.parse(origin);
@@ -31,29 +33,38 @@ function reply(data: unknown, isError: boolean): CallToolResult {
 	return { isError: true, content: [{ type: "text", text: `The LearnHarness reply exceeds the MCP result limit. ${unknownOutcome}` }] };
 }
 
-export function createMcpWriteClient(origin: string, dataDirectory: string, token: string | undefined): McpWriteClient {
+export function createMcpWriteClient(origin: string, dataDirectory: string, token: string | undefined): McpWriteClient;
+export function createMcpWriteClient(origin: string, dataDirectory: string, token: string | undefined, options: { clientReasoning: true }): McpClientWriteClient;
+export function createMcpWriteClient(origin: string, dataDirectory: string, token: string | undefined, options?: { clientReasoning: true }): McpWriteClient | McpClientWriteClient {
 	const endpoint = appEndpoint(origin);
 	if (!isMcpWriteToken(token)) throw new Error("--app-url requires LH_MCP_WRITE_TOKEN with 64 lowercase hexadecimal characters.");
 	const headers = {
 		"content-type": "application/json",
 		authorization: `Bearer ${token}`,
 		[MCP_PROFILE_HEADER]: mcpWriteProfileProof(dataDirectory, token),
+		...(options?.clientReasoning ? { [MCP_CLIENT_HEADER]: "1" } : {}),
 	};
-	return async (operation, signal) => {
+	return async (operation: McpWriteOperation | McpClientOperation, signal: AbortSignal) => {
+		const payload = JSON.stringify(operation);
+		if (options?.clientReasoning && Buffer.byteLength(payload) > MCP_CLIENT_REQUEST_BYTES) {
+			return reply({ error: "The LearnHarness client reasoning request exceeds the 256 KiB limit." }, true);
+		}
 		try {
 			const response = await directFetch(endpoint, {
-				method: "POST", headers, body: JSON.stringify(operation), signal, redirect: "error", dispatcher: loopbackDispatcher,
+				method: "POST", headers, body: payload, signal, redirect: "error", dispatcher: loopbackDispatcher,
 			});
 			const body = await readBoundedJson(response as unknown as Response, MCP_RESULT_LIMIT_BYTES);
 			if (!response.ok) {
 				const error = appError.safeParse(body);
 				if (error.success) return reply(response.status >= 500 ? { ...error.data, notice: unknownOutcome } : error.data, true);
+			} else if (options?.clientReasoning) {
+				if (typeof body === "object" && body !== null && !Array.isArray(body)) return reply(body, false);
 			} else if (operation.operation === "import_file") {
 				const imported = importResult.safeParse(body);
 				if (imported.success && imported.data.results[0].filePath === operation.path) {
 					return reply(imported.data, !imported.data.results[0].ok);
 				}
-			} else {
+			} else if (operation.operation === "attach_file") {
 				const attached = attachmentResult.safeParse(body);
 				if (attached.success && attached.data.session_id === operation.session_id) return reply(attached.data, false);
 			}

@@ -25,6 +25,7 @@ import { coverageOf } from "../core/coverage.ts";
 import type { ChatStore, GraphStore } from "../core/ports.ts";
 import type { ExtractionPipeline } from "../agent/subagents/extraction.ts";
 import { ModelsNotConfiguredError, ProviderKeyMissingError } from "../core/settings.ts";
+import { currentClientInference } from "./mcp-inference.ts";
 
 /** Distinguish a failed canonical save from later bookkeeping failures. */
 export class TurnPersistenceError extends Error {
@@ -103,8 +104,8 @@ export function persistTurn(
  * next trigger (or the manual extract button) re-runs what's left.
  *
  * Deliberately isolated in this one seam — the pipeline is
- * trigger-agnostic. Skipped under tests: scripted chats are fixtures, not
- * knowledge (the pipeline itself is tested directly with mock models).
+ * trigger-agnostic. Ordinary scripted chats skip extraction under tests.
+ * MCP keeps the trigger in the caller's scope until its work settles.
  */
 export function triggerExtraction(
 	deps: { chatStore: ChatStore; graphStore: GraphStore },
@@ -112,13 +113,15 @@ export function triggerExtraction(
 	chatId: string,
 	chunkTokens: number,
 ): void {
-	if (process.env.NODE_ENV === "test") return;
+	const client = currentClientInference();
+	if (client?.signal.aborted || (process.env.NODE_ENV === "test" && !client)) return;
 	try {
 		const record = deps.chatStore.getChat(chatId);
 		if (!record) return;
 		const covered = coverageOf(record.messages, deps.graphStore.readCoverage(), chatId);
 		if (covered.uncoveredTokens < chunkTokens) return;
-		void extraction.runExtraction(chatId).catch((err) => {
+		const work = extraction.runExtraction(chatId);
+		void (client?.track(work) ?? work).catch((err) => {
 			// BYOK (owner, 2026-09-22) + key presence (provider-key interlude,
 			// 2026-09-25): an unconfigured OR keyless write channel SKIPS (the
 			// coverage ledger keeps the messages uncovered — the next trigger

@@ -723,6 +723,28 @@ export function isCorrect(selectedIndices: number[], correctIndices: number[]): 
 
 // ─── arming + answering ─────────────────────────────────────────────────────
 
+export function questionDataFromInput(id: string, kind: QuestionKind, input: QuizToolInput | AskToolInput | ExplainToolInput): QuestionData {
+	const quiz = kind === "quiz" ? input as QuizToolInput : undefined;
+	const ask = kind === "ask" ? input as AskToolInput : undefined;
+	const explain = kind === "explain" ? input as ExplainToolInput : undefined;
+	const multi = "multiSelect" in input && input.multiSelect === true;
+	const { options, optionOrder } = questionDisplayOptions(quiz?.options ?? ask?.options, kind, multi, id);
+	const question: QuestionData = {
+		id, kind, questionType: quiz ? normalizeQuizType(quiz.type) : undefined,
+		question: input.question, context: input.details,
+		mode: quiz || ask?.options?.length ? multi ? "multi-select" : "single-select" : "text",
+		options, optionOrder, createdAt: new Date().toISOString(),
+	};
+	if (quiz) {
+		const resolved = resolveCorrect(quiz.correctAnswer, options);
+		if (resolved.error) console.error("[quiz] correctAnswer did not resolve:", resolved.error);
+		question.correctIndices = resolved.indices;
+		question.explanation = quiz.explanation;
+	}
+	if (explain) question.committedAnswer = explain.correctAnswer;
+	return question;
+}
+
 export function toClientQuestion(qd: QuestionData): ClientQuestion {
 	return {
 		id: qd.id,

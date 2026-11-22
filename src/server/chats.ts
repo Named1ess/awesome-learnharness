@@ -3,6 +3,8 @@ import { isJobLive } from "../agent/subagents/aborts.ts";
 import { coverageOf } from "../core/coverage.ts";
 import { deleteChatTraces, type ChatDeleteMode, type ChatDeletionStats } from "../core/graph-deletion.ts";
 import { titleFromPrompt } from "../core/contracts.ts";
+import { chainsForSelection, formatChainLine } from "../core/chains.ts";
+import { newGraphContextMessage, type GraphContextPick } from "../core/native-messages.ts";
 import { graphRevision } from "./graph.ts";
 import { stores } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
@@ -24,6 +26,23 @@ import { sideChats } from "./side-chat.ts";
 
 export const { createChat, getChat, listChats } = stores.chatStore;
 export { titleFromPrompt };
+
+/** Shared creation path for the session picker and authenticated MCP writes. */
+export function createChatSession(title: string, kind: "teach" | "practice", picks: GraphContextPick[], stampModel = true) {
+	const chat = createChat(titleFromPrompt(title || "Untitled session"), kind === "practice" ? kind : undefined);
+	const strong = stampModel ? stores.settingsStore.readSettings()?.models?.strong : undefined;
+	if (strong?.model) {
+		stores.chatStore.saveSettings(chat.id, { model: strong.model, thinkingLevel: strong.thinkingLevel });
+	}
+	if (picks.length > 0) {
+		const byId = new Map(stores.graphStore.readNodes().map(node => [node.id, node]));
+		const pickedNodes = picks.map(pick => byId.get(pick.id)).filter(node => node !== undefined);
+		const chainLines = chainsForSelection(pickedNodes, stores.graphStore.readChains()).map(chain =>
+			formatChainLine(chain, Object.fromEntries(byId)));
+		stores.chatStore.saveMessages(chat.id, [newGraphContextMessage(picks, chainLines)]);
+	}
+	return { id: chat.id, title: chat.title };
+}
 export type { ChatDeleteMode, ChatDeletionStats } from "../core/graph-deletion.ts";
 
 /** How long the wind-down wait may take before the caller gets a retryable

@@ -7,6 +7,7 @@ import type { EmissionStats } from "../core/contracts/graph.ts";
 import { emit } from "../core/events.ts";
 import { ModelsNotConfiguredError, PROVIDER_KEY_MISSING_CODE, ProviderKeyMissingError } from "../core/settings.ts";
 import { extraction } from "./chat-handler.ts";
+import { currentClientInference } from "./mcp-inference.ts";
 import { sourceDirectory } from "./source-organization.ts";
 
 interface ImportResult {
@@ -34,14 +35,14 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // "%PDF-"
 type NotesFile = { kind: "notes"; text: string; notice?: string } | { kind: "refused"; error: string };
 
 /** A PDF becomes page-marked Markdown; any other accepted file is read as text. */
-async function readNotesFile(file: File): Promise<NotesFile> {
+async function readNotesFile(file: File, signal?: AbortSignal): Promise<NotesFile> {
 	if (!IMPORT_EXTENSIONS.test(file.name)) return { kind: "refused", error: UNSUPPORTED_TYPE_MESSAGE };
 	const bytes = new Uint8Array(await file.arrayBuffer());
 	if (!PDF_MAGIC.every((byte, i) => bytes[i] === byte)) {
 		if (bytes.subarray(0, 8192).includes(0)) return { kind: "refused", error: "This file isn't plain text." };
 		return { kind: "notes", text: new TextDecoder().decode(bytes) };
 	}
-	const pdf = await convertPdf(bytes, MAX_PDF_PAGES);
+	const pdf = await convertPdf(bytes, MAX_PDF_PAGES, { signal });
 	switch (pdf.kind) {
 		case "unreadable":
 			return { kind: "refused", error: "Could not open this PDF." };
@@ -78,6 +79,10 @@ export async function importGraphNotes(files: File[], suppliedPaths: FormDataEnt
 		return Response.json({ results: [], error: "Import contains an unsafe or mismatched relative path" }, { status: 400 });
 	}
 	const results: ImportResult[] = [];
+	const signal = currentClientInference()?.signal;
+	const checkCancellation = () => {
+		if (signal?.aborted) throw new NotesImportError("aborted", { nodes: 0, chains: 0 }, "Caller extraction cancelled.");
+	};
 	const queue = files.map((file, requestIndex) => ({ file, requestIndex, filePath: paths[requestIndex]! }));
 	const workers = Array.from({ length: Math.min(3, files.length) }, async () => {
 		for (;;) {
@@ -85,7 +90,9 @@ export async function importGraphNotes(files: File[], suppliedPaths: FormDataEnt
 			if (!next) return;
 			const { file, requestIndex, filePath } = next;
 			try {
-				const notes = await readNotesFile(file);
+				checkCancellation();
+				const notes = await readNotesFile(file, signal);
+				checkCancellation();
 				if (notes.kind === "refused") {
 					results.push({ filePath, requestIndex, outcome: "failed", ok: false, error: notes.error });
 					continue;
@@ -100,6 +107,8 @@ export async function importGraphNotes(files: File[], suppliedPaths: FormDataEnt
 				} else if (err instanceof ProviderKeyMissingError) {
 					results.push({ filePath, ok: false, requestIndex, outcome: "failed", error: err.envelope.error,
 						code: PROVIDER_KEY_MISSING_CODE, provider: err.envelope.provider, slots: err.envelope.slots });
+				} else if (signal?.aborted && !(err instanceof NotesImportError)) {
+					results.push({ filePath, requestIndex, outcome: "aborted", ok: false, error: "Caller extraction cancelled." });
 				} else {
 					results.push({ filePath, requestIndex, ok: false,
 						outcome: err instanceof NotesImportError ? err.outcome : "failed",

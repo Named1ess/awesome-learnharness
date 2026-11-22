@@ -3,8 +3,9 @@
  * stays in fs-shared; do NOT add a whole data/userData denial here. */
 import os from "node:os";
 import path from "node:path";
-import type { FileAccessPolicy } from "../agent/tools/file-access.ts";
+import { isWithin, resolvePolicy, type FileAccessPolicy } from "../agent/tools/file-access.ts";
 import { readFileAccessSettings } from "../store/settings.ts";
+import { currentClientInference } from "./mcp-inference.ts";
 
 export function expandFolder(folder: string, home: string = os.homedir()): string {
 	if (folder === "~") return home;
@@ -16,7 +17,18 @@ export function expandFolder(folder: string, home: string = os.homedir()): strin
 export function fileAccessPolicy(): FileAccessPolicy {
 	const result = readFileAccessSettings();
 	if (!result.ok) return { restricted: true, folders: [], error: result.error };
-	return { restricted: result.settings.restricted, folders: result.settings.folders.map((folder) => expandFolder(folder)) };
+	const native = { restricted: result.settings.restricted, folders: result.settings.folders.map((folder) => expandFolder(folder)) };
+	const client = currentClientInference();
+	if (!client) return native;
+	const root = client.filesDirectory;
+	if (!root || !resolvePolicy({ restricted: true, folders: [root] }).folders.some(folder => path.relative(root, folder) === "")) {
+		return { restricted: true, folders: [] };
+	}
+	if (!native.restricted) return { restricted: true, folders: [root] };
+	return { restricted: true, folders: resolvePolicy(native).folders.flatMap(folder => {
+		if (isWithin(root, folder)) return [root];
+		return isWithin(folder, root) ? [folder] : [];
+	}) };
 }
 
 /** Safe UI diagnostic, no raw JSON/file contents. A corrupt record must

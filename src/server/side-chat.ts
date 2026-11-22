@@ -22,6 +22,7 @@ import { effectiveSettings, stores } from "./stores.ts";
 import { providerKeyPresent } from "./keys.ts";
 import { refreshConnectionCatalog } from "./model-catalog.ts";
 import { awaitCompaction } from "./compaction.ts";
+import { currentClientInference } from "./mcp-inference.ts";
 
 export type SideStreamEvent =
 	| { type: "thread"; thread: SideChatThread }
@@ -118,10 +119,14 @@ export function createSideChatService(deps: SideChatDeps): SideChatService {
 	}
 
 	async function ask(chatId: string, input: SideAskInput): Promise<Response> {
+		const client = currentClientInference();
+		const cancelled = () => Response.json({ error: "The external model operation was cancelled." }, { status: 409 });
+		if (client?.signal.aborted) return cancelled();
 		await deps.beforeAsk?.(chatId);
+		if (client?.signal.aborted) return cancelled();
 		const initial = deps.chatStore.getChat(chatId);
 		if (!initial) return Response.json({ error: "Unknown chat" }, { status: 404 });
-		const engine = await deps.engineFor(initial);
+		const engine: SideEngine | Response = client ? client.engine("sideQuestion") : await deps.engineFor(initial);
 		if (engine instanceof Response) return engine;
 		// No awaits between reading, deduplicating, saving and registration.
 		const record = deps.chatStore.getChat(chatId);
@@ -189,16 +194,20 @@ export function createSideChatService(deps: SideChatDeps): SideChatService {
 			listeners: new Set(), settled: Promise.resolve(),
 		};
 		runs.set(key, run);
+		const signal = client ? AbortSignal.any([run.controller.signal, client.signal]) : run.controller.signal;
 		const broadcast = (event: SideStreamEvent) => {
 			for (const listener of [...run.listeners]) { try { listener(event); } catch { /* detached view */ } }
 		};
 		announce(chatId);
+		let settlementError: Error | undefined;
 		run.settled = (async () => {
 			let settledThread: SideChatThread | undefined;
 			try {
-				const result = await streamSideAnswer({ engine, instructions, turns, signal: run.controller.signal, chatId, runId: run.answerId,
+				const result = await streamSideAnswer({ engine, instructions, turns, signal, chatId, runId: run.answerId,
 					onText: (text) => { run.text = text; run.updatedAt = new Date().toISOString(); broadcast({ type: "text", text }); },
 				});
+				if (result.outcome !== "done") settlementError = new Error(result.outcome === "aborted"
+					? "The side answer was cancelled." : "The external side answer did not finish.");
 				const at = new Date().toISOString();
 				const answer: SideChatMessage = {
 					id: run.answerId, role: "assistant", text: result.text, at, model: run.model, requestId: input.requestId,
@@ -220,6 +229,7 @@ export function createSideChatService(deps: SideChatDeps): SideChatService {
 					} catch { /* deleted session has no usage destination */ }
 				}
 			} catch (error) {
+				settlementError = new Error("The side answer could not be saved.");
 				console.error(`[chat ${chatId}] side answer failed to save:`, error);
 				broadcast({ type: "error", error: "The side answer could not be saved." });
 			} finally {
@@ -230,6 +240,7 @@ export function createSideChatService(deps: SideChatDeps): SideChatService {
 				run.listeners.clear();
 			}
 		})();
+		if (client) void client.track(run.settled.then(() => { if (settlementError) throw settlementError; })).catch(() => undefined);
 		return responseFor(chatId, thread, run);
 	}
 

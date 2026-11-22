@@ -693,6 +693,10 @@ export function extractionStatuses(): RunningExtraction[] {
 	return [...runs().running.values()].sort((a, b) => a.startedAt - b.startedAt);
 }
 
+export function extractionInFlight(sourceId: string): boolean {
+	return runs().inFlight.has(sourceId);
+}
+
 /** True cancellation of the in-flight run for a chat (the dock's abort
  *  button): the pending model call receives the signal — the provider
  *  cancels the request, spend stops — and the run ends like a failure:
@@ -713,6 +717,8 @@ export function abortExtraction(chatId: string): boolean {
 // ─── the pipeline ───────────────────────────────────────────────────────────
 
 export interface ExtractionModels {
+	/** Caller-specific inference for MCP. Only an explicit scope bypasses app model and key admission. */
+	clientInference?: () => { engine(role: ModelRole): PiEngine; signal: AbortSignal } | undefined;
 	/** Test seam: a scripted engine per stage — checked FIRST, ahead of the
 	 *  engineFor chain (production wires no direct values). */
 	extractor?: PiEngine;
@@ -801,12 +807,13 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	// = the BYOK chain came up empty; the front-door guards turn that into
 	// an honest refusal.
 	const stageEngine = (role: ModelRole, override?: PiEngine): PiEngine | undefined =>
-		override ?? deps.engineFor?.(role);
+		deps.clientInference?.()?.engine(role) ?? override ?? deps.engineFor?.(role);
 	/** The per-need refusal guard: which slot tiers the pipeline's stages
 	 *  found unset (test values count as configured — they ARE engines),
 	 *  and whether a configured stage's provider key is gone (provider-key
 	 *  interlude, 2026-09-25) — both refuse BEFORE any batch runs. */
 	function refuseIfStagesUnready(): void {
+		if (deps.clientInference?.()) return;
 		const stages: readonly [ModelRole, PiEngine | undefined][] = [
 			["extractor", stageEngine("extractor", deps.extractor)],
 			["auditor", stageEngine("auditor", deps.auditor)],
@@ -1046,7 +1053,11 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	): Promise<EmissionStats> {
 		const jobKey = source.part ? `${source.id}#${source.part.i}` : source.id;
 		const t0 = performance.now();
+		const clientSignal = deps.clientInference?.()?.signal;
+		const abortClientJob = () => runningExtractions.get(jobKey)?.controller.abort();
 		try {
+			if (clientSignal?.aborted) throw new DOMException("Caller extraction cancelled.", "AbortError");
+			clientSignal?.addEventListener("abort", abortClientJob, { once: true });
 			const stats = await body(jobKey);
 			persistRunUsage(jobKey, Math.round(performance.now() - t0), stats);
 			return stats;
@@ -1054,6 +1065,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			persistRunUsage(jobKey, Math.round(performance.now() - t0), undefined);
 			throw err;
 		} finally {
+			clientSignal?.removeEventListener("abort", abortClientJob);
 			finishExtraction(jobKey);
 		}
 	}
@@ -1168,6 +1180,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 								setPhase(jobKey, "auditing", "chat", undefined, part);
 								const auditResult = await audit(jobKey, chatId, findings);
 								setPhase(jobKey, "merging", "chat", undefined, part);
+								runningExtractions.get(jobKey)?.controller.signal.throwIfAborted();
 								// SESSION-DELETION GUARD (wave 6): a chat deleted mid-run must never
 								// merge. The deletion route aborts this run first and runs its purge
 								// as one sync block; this closes the last window — a run that slipped
@@ -1344,6 +1357,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 								setPhase(jobKey, "auditing", "notes", input.filePath, part);
 								const auditResult = await audit(jobKey, input.id, findings);
 								setPhase(jobKey, "merging", "notes", input.filePath, part);
+								runningExtractions.get(jobKey)?.controller.signal.throwIfAborted();
 								const merged = mergeFindings(
 									id,
 									findings,
@@ -1408,6 +1422,9 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	/** Every explicit import processes the whole file. Identity, source digest,
 	 * auditor and usage history remain source-scoped; this is not exactly-once. */
 	async function importNotes(input: NotesImportInput): Promise<EmissionStats> {
+		if (deps.clientInference?.()?.signal.aborted) {
+			throw new NotesImportError("aborted", { nodes: 0, chains: 0 }, "Caller extraction cancelled.");
+		}
 		const id = `src_${crypto.createHash("sha256").update(input.filePath).digest("hex").slice(0, 12)}`;
 		// Acquire BEFORE source upsert: overlapping contents must not alter metadata.
 		if (inFlight.has(id)) throw new NotesImportError("busy", { nodes: 0, chains: 0 }, "This file is already being imported. Try again when it finishes.");

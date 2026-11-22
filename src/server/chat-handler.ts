@@ -13,9 +13,11 @@ import { chatGPTStreamError } from "../agent/chatgpt-stream.ts";
 import { SubscriptionRequestCycle, type SubscriptionDispatchLifecycle } from "../agent/subscription-request-cycle.ts";
 import { reconstructRequestCause } from "../core/native-messages.ts";
 import { createJobRunner } from "../agent/subagents/runner.ts";
+import type { JobToolContext } from "../agent/tools/jobs.ts";
 import { createExtractionPipeline } from "../agent/subagents/extraction.ts";
 import type { ModelRole } from "../../config.ts";
 import {
+	abortJob,
 	deliverJobResult,
 	noteSteersDurable,
 	reconcileUserSteers,
@@ -39,6 +41,7 @@ import { searchAvailable, searchProvider } from "./search.ts";
 import { prepareSubmissionImages, prepareSubmissionImageChannels, prepareProblemSubmissionImageChannels, submissionImagePolicyKey } from "./submission-images.ts";
 import { preparePluginProblemSubmission, requirePluginProblemTarget, type ProblemTypeResolver } from "./plugin-problems.ts";
 import { providerKeyPresent } from "./keys.ts";
+import { clientInferenceForChat, currentClientInference, runWithClientInference } from "./mcp-inference.ts";
 import { CLAUDE_CODE_PROVIDER } from "../core/contracts/claude-code.ts";
 import {
 	extractionEnabled,
@@ -55,13 +58,13 @@ import { sideChats, type SideChatService } from "./side-chat.ts";
 import { SIDE_CONTEXT_BUDGET_ERROR, sideBudgetRetryDrops, sideContextWindow } from "./side-context-budget.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
-import { activeProblemOf, hasProbeDone, hasUnresolvedQuestion, pendingPluginQuestionOf, pluginQuestionCallsOf, questionCallsOf } from "../core/native-messages.ts";
+import { activeProblemOf, endsInDismissal, endsInQuestionRecovery, hasProbeDone, hasUnresolvedQuestion, pendingPluginQuestionOf, pluginQuestionCallsOf, questionCallsOf } from "../core/native-messages.ts";
 import { samePluginQuestionOccurrence } from "../core/plugin-questions.ts";
 import { composeInstructions } from "../agent/teacher-agent.ts";
-import { ensureCompacted, kickCompaction, effectiveThresholdTokens, projectedContextTokens, compactionInFlight } from "./compaction.ts";
+import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, projectedContextTokens, compactionInFlight } from "./compaction.ts";
 import { COMPACTION_RESERVE_TOKENS } from "../core/compaction.ts";
 import { catalogContextLimits, refreshConnectionCatalog } from "./model-catalog.ts";
-import { emit } from "../core/events.ts";
+import { emit, subscribe } from "../core/events.ts";
 import { settledTurnResponse } from "./turn-runs.ts";
 import { asAgentMessages, type LhMessage } from "../core/native-messages.ts";
 import { QUESTION_TOOLS } from "../core/pending.ts";
@@ -99,7 +102,7 @@ import type {CallUsage} from "../core/contracts.ts";
 
 /** Fresh check only at new background-run admission; never cancel a run
  * already in progress when the opt-in is switched off. */
-function connectionBackgroundAllowed(provider: string): boolean {
+function connectionBackgroundAllowed(provider: string | undefined): boolean {
 	return subscriptionBackgroundAllowed(provider) && (provider !== CLAUDE_CODE_PROVIDER || providerKeyPresent(provider));
 }
 
@@ -110,7 +113,7 @@ function settlementErrorText(error: unknown): string {
 const jobRunner = createJobRunner({
 	chatStore: stores.chatStore,
 	jobStore: stores.jobStore,
-	deliver: deliverJobResult,
+	deliver: deliverCallerSteer,
 	// BYOK (owner, 2026-09-22): job engines resolve the chain — role
 	// override → slot → NOTHING — read FRESH per job (a settings PUT
 	// between dispatch and spawn lands); an empty chain flows through as
@@ -122,7 +125,7 @@ const jobRunner = createJobRunner({
 	// layer may not read the key store); a missing key refuses the spawn
 	// with the 503-envelope family instead of dying mid-run.
 	providerKeyMissing: (provider, tier) =>
-		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
+		currentClientInference() || providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
 	// Search port wave (2026-09-20): the researcher's web_search runs on the
 	// injected port — resolved FRESH per job (key rotations land immediately).
 	// null = honestly unavailable; the dispatch-level drop (below) uses the
@@ -134,6 +137,7 @@ const jobRunner = createJobRunner({
  *  (/api/graph/import) hit the same single-flight registry. */
 export const extraction = createExtractionPipeline({
 	...stores,
+	clientInference: currentClientInference,
 	// BYOK (owner, 2026-09-22): the extraction stages resolve the chain —
 	// role override → slot → NOTHING — read FRESH per stage call; an empty
 	// chain flows through as undefined and the pipeline refuses the run
@@ -153,7 +157,11 @@ export const extraction = createExtractionPipeline({
 // marker, appended natively under the turn claim), and crash recovery
 // re-spawns orphaned sub-agent loops through THIS runner.
 setTurnRunner(async (chatId, input) => {
-	const res = await handleChatInput(chatId, input);
+	const client = clientInferenceForChat(chatId);
+	if (client?.signal.aborted || (!client && currentClientInference())) return 403;
+	const res = client
+		? await runWithClientInference(client, () => handleChatInput(chatId, input))
+		: await handleChatInput(chatId, input);
 	// Drive the stream to completion server-side — nobody else will read it,
 	// and onFinish (persist, extraction, endTurn) only runs when it drains.
 	await res.arrayBuffer().catch(() => undefined);
@@ -164,8 +172,38 @@ setTurnRunner(async (chatId, input) => {
  *  flows through to the per-need refusal gates (runner/extraction), read
  *  FRESH so a settings PUT between dispatch and spawn lands. */
 function resolveEngine(role: ModelRole): PiEngine | undefined {
+	const client = currentClientInference();
+	if (client) return client.engine(role);
 	const spec = resolveRoleSpec(role, stores.settingsStore.readSettings());
 	return spec ? piEngineForSpec(spec, true, undefined, retentionForSlot(ROLE_SLOT[role])) : undefined;
+}
+
+function deliverCallerSteer(steer: Parameters<typeof deliverJobResult>[0]): Promise<void> {
+	const work = deliverJobResult(steer);
+	const client = currentClientInference();
+	if (!client || client.signal.aborted) return work;
+	const details = steer.details as { chatId?: string; jobId?: string } | undefined;
+	const chatId = steer.customType === "probe-handoff" ? details?.chatId : details?.jobId && stores.jobStore.getJob(details.jobId)?.chatId;
+	if (!chatId) return work;
+	// Keep the current caller available for the native wake. An unanswered
+	// question or a dismissal can hold delivery for another learner turn.
+	const parked = Promise.withResolvers<void>();
+	const release = () => parked.resolve();
+	const releaseIfHeld = () => {
+		const record = stores.chatStore.getChat(chatId);
+		if (!record || (!isTurnRunning(chatId) && (hasUnresolvedQuestion(record.messages) ||
+			endsInDismissal(record.messages) || endsInQuestionRecovery(record.messages)))) parked.resolve();
+	};
+	const unsubscribe = subscribe(event => {
+		if ((event.type === "turn-settled" || event.type === "record-changed") && event.chatId === chatId) releaseIfHeld();
+	});
+	client.signal.addEventListener("abort", release, { once: true });
+	releaseIfHeld();
+	void client.track(Promise.race([work, parked.promise]).finally(() => {
+		unsubscribe();
+		client.signal.removeEventListener("abort", release);
+	})).catch(() => undefined);
+	return work;
 }
 
 /** Slot policy is independent of model overrides. Read fresh per operation,
@@ -246,6 +284,9 @@ async function runChatInput(
 	sideContext: Pick<SideChatService, "snapshot">,
 	mcpAttachment = false,
 ): Promise<Response> {
+	const client = currentClientInference();
+	const cancelled = () => Response.json({ error: "The external model operation was cancelled." }, { status: 409 });
+	if (client?.signal.aborted) return cancelled();
 	// The attachment entry must leave a blocked session untouched. In the
 	// UI path, compatibility reconciliation may itself dismiss a question.
 	if (!mcpAttachment) await reconcilePluginQuestionCompatibility(stores.chatStore, chatId);
@@ -320,8 +361,8 @@ async function runChatInput(
 	// write-ahead persist (nothing durable changes), and every downstream
 	// resolution (jobs/extraction gate per-need on their own tiers).
 	const effective = effectiveSettings();
-	const conversation = resolveConversationSpec(record.settings, effective.models.strong);
-	if (!conversation) {
+	const conversation = client ? null : resolveConversationSpec(record.settings, effective.models.strong);
+	if (!client && !conversation) {
 		const envelope = modelsNotConfigured(["strong"]);
 		console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
 		return Response.json(envelope, { status: 503 });
@@ -336,14 +377,16 @@ async function runChatInput(
 	// persist (nothing durable changes); wake-pipeline turns ride the same
 	// path. The affected tier is strong — the conversation chain's own tier
 	// (a chat.model override still resolves through it).
-	if (isSubscriptionProvider(conversation.provider)) {
-		await refreshConnectionCatalog(conversation.provider);
-		if (input.type === "steers" && !connectionBackgroundAllowed(conversation.provider)) {
+	const provider = conversation?.provider;
+	const subscription = provider && isSubscriptionProvider(provider) ? provider : undefined;
+	if (subscription) {
+		await refreshConnectionCatalog(subscription);
+		if (input.type === "steers" && !connectionBackgroundAllowed(subscription)) {
 			return Response.json({ error: "Background use is off for this connection. Automatic follow-up remains deferred in its queue." }, { status: 403 });
 		}
 	}
-	if (!providerKeyPresent(conversation.provider)) {
-		const envelope = providerKeyMissingEnvelope(conversation.provider, ["strong"]);
+	if (provider && !providerKeyPresent(provider)) {
+		const envelope = providerKeyMissingEnvelope(provider, ["strong"]);
 		console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
 		return Response.json(envelope, { status: 503 });
 	}
@@ -371,10 +414,16 @@ async function runChatInput(
 	let conversationEngine: PiEngine;
 	let compactionEngine: PiEngine;
 	try {
-		conversationEngine = piEngineForSpec(conversation, () => callPurpose.background, lifecycle, retentionForSlot("strong"));
-		compactionEngine = piEngineForSpec(conversation, true, undefined, retentionForSlot("strong"));
+		if (conversation) {
+			conversationEngine = piEngineForSpec(conversation, () => callPurpose.background, lifecycle, retentionForSlot("strong"));
+			compactionEngine = piEngineForSpec(conversation, true, undefined, retentionForSlot("strong"));
+		} else {
+			const role = record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teacher" : "prober";
+			conversationEngine = client!.engine(role);
+			compactionEngine = client!.engine("compaction");
+		}
 	}
-	catch { return Response.json({ error: conversation.provider === "chatgpt" ? chatGPTStreamError("model catalog") : isSubscriptionProvider(conversation.provider) ? nativeSubscriptionError(conversation.provider, "model catalog") : "The selected model is unavailable." }, { status: 503 }); }
+	catch { return Response.json({ error: provider === "chatgpt" ? chatGPTStreamError("model catalog") : subscription ? nativeSubscriptionError(subscription, "model catalog") : "The selected model is unavailable." }, { status: 503 }); }
 	const capturedPolicy = submissionImagePolicyKey(conversationEngine);
 	const capturedConversation = JSON.stringify(conversation);
 	try {
@@ -397,7 +446,7 @@ async function runChatInput(
 		throw err;
 	}
 	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
-	const contextWindow = catalogContextLimits().get(modelIdForCompaction);
+	const contextWindow = client ? conversationEngine.model.contextWindow || undefined : catalogContextLimits().get(modelIdForCompaction);
 	const thresholdTokens = effectiveThresholdTokens(effective.compaction?.thresholdTokens, contextWindow);
 	const systemPromptTokens = Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher").length / 4);
 	const estimateModel = effective.compaction.includeReasoning ? conversationEngine.model : undefined;
@@ -409,7 +458,7 @@ async function runChatInput(
 		// Retry's transient SDK prefix omits ALL tail failures. Keep the saved
 		// history in the metadata-only view so omission cannot revive a report
 		// invalidated by a genuine provider failure. New live responses win.
-		const saved = conversation.provider === CLAUDE_CODE_PROVIDER ? stores.chatStore.getChat(chatId)?.messages ?? [] : [];
+		const saved = provider === CLAUDE_CODE_PROVIDER ? stores.chatStore.getChat(chatId)?.messages ?? [] : [];
 		const savedIds = new Set(saved.map((message) => message.id));
 		const reportHistory = saved.length ? [...saved, ...live.filter((message) => !savedIds.has(message.id))] : live;
 		const window = sideContextWindow(reportHistory, conversationEngine.model, contextWindow, input.type === "retry");
@@ -430,7 +479,7 @@ async function runChatInput(
 		{
 			chatStore: stores.chatStore,
 			engine: compactionEngine,
-			canStart: () => !isTurnRunning(chatId) && connectionBackgroundAllowed(conversation.provider),
+			canStart: () => !isTurnRunning(chatId) && (client ? !client.signal.aborted : connectionBackgroundAllowed(provider)),
 			modelId: modelIdForCompaction,
 			kind: record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
 			includeReasoning: effective.compaction.includeReasoning,
@@ -490,10 +539,11 @@ async function runChatInput(
 	// may intervene before the save-only write or beginTurn/write below.
 	const staleSubmission = () => Response.json({ code: "submission-stale", error: "The submission target or selected model changed. Your input has been kept." }, { status: 412 });
 	const submissionIsCurrent = (checkModel = true) => {
+		if (client?.signal.aborted) return false;
 		if (!freshSubmission) return true;
 		if (record.createdAt !== capturedSession.createdAt || record.kind !== capturedSession.kind) return false;
 		try {
-			if (checkModel) {
+			if (checkModel && !client) {
 				const spec = resolveConversationSpec(record.settings, effectiveSettings().models.strong);
 				if (!spec || JSON.stringify(spec) !== capturedConversation) return false;
 				const checked = piEngineForSpec(spec, () => callPurpose.background, lifecycle, retentionForSlot("strong"));
@@ -509,6 +559,7 @@ async function runChatInput(
 		} catch { return false; }
 		return true;
 	};
+	if (client?.signal.aborted) return cancelled();
 	if (!submissionIsCurrent()) return staleSubmission();
 	// Recompute Retry eligibility on current truth, still before beginTurn.
 	// A compaction marker or another writer may have landed during awaits.
@@ -632,7 +683,7 @@ async function runChatInput(
 	const sideContextBlocked = sideQuestions.length > 0 && !fitsSideContext(prospective);
 	// An automatic batch has not been admitted; refuse it without persisting
 	// its markers. Its existing caller retains/restores the queued work.
-	if (sideContextBlocked && isSubscriptionProvider(conversation.provider) && input.type === "steers") {
+	if (sideContextBlocked && subscription && input.type === "steers") {
 		endTurn(chatId);
 		return new Response(sideBudgetError().message, { status: 400 });
 	}
@@ -645,7 +696,7 @@ async function runChatInput(
 	// failures only. Count that SAME temporary prefix at settlement, or the
 	// retained failures would make persistTurn skip genuinely new output.
 	const agentMessages = input.type === "retry" ? merged.filter((m) => !retryOmissions.has(m.id)) : merged;
-	const stagedAutomatic = isSubscriptionProvider(conversation.provider) && input.type === "steers";
+	const stagedAutomatic = Boolean(subscription) && input.type === "steers";
 	let persistBaseCount = stagedAutomatic ? record.messages.length : agentMessages.length;
 	try {
 		if (!stagedAutomatic) {
@@ -705,12 +756,12 @@ async function runChatInput(
 	// enabled). The definitive toggleable set is TOGGLEABLE_TOOLS — the
 	// sub-agent JOB tools (research/demo/visual/pdf; adjudicated with the
 	// user: quiz/ask/fs/plan/probe_done are always-on).
-	if (isSubscriptionProvider(conversation.provider)) requestCycle = new SubscriptionRequestCycle({
+	if (subscription) requestCycle = new SubscriptionRequestCycle({
 		initialMessages: asAgentMessages(agentMessages),
 		staged: stagedAutomatic ? asAgentMessages(appends) : undefined,
 		foregroundOwed: !callPurpose.background,
 		purpose: callPurpose,
-		scopeCurrent: (scope) => connectionScopeCurrent(conversation.provider, scope),
+		scopeCurrent: (scope) => connectionScopeCurrent(subscription, scope),
 		commitStaged: () => {
 			stores.chatStore.saveMessages(chatId, merged);
 			persistBaseCount = merged.length;
@@ -778,6 +829,14 @@ async function runChatInput(
 	// split, no plan/question/job tools; the whole registry is
 	// problem + conclude. buildAgent stays honored (the test seam is
 	// uniform across kinds).
+	const spawnJob: JobToolContext["spawn"] = (job, input) => {
+		if (client?.signal.aborted) { abortJob(job.id); return; }
+		const work = jobRunner.runJob(job.id, input);
+		if (!client) return;
+		const abort = () => runWithClientInference(client, () => abortJob(job.id));
+		client.signal.addEventListener("abort", abort, { once: true });
+		void client.track(work.finally(() => client.signal.removeEventListener("abort", abort))).catch(() => undefined);
+	};
 	const constructed: TeachingAgent = buildAgent
 		? buildAgent({ ...agentOpts, teaching })
 		: record.kind === "practice"
@@ -797,7 +856,7 @@ async function runChatInput(
 						jobs: {
 							chatId,
 							jobStore: stores.jobStore,
-							spawn: (job, input) => void jobRunner.runJob(job.id, input),
+							spawn: spawnJob,
 							searchAvailable,
 						},
 						...(graphToolsEnabled(effective) ? { graph: { chatStore: stores.chatStore, graphStore: stores.graphStore } } : {}),
@@ -810,7 +869,7 @@ async function runChatInput(
 						chatId,
 						chatStore: stores.chatStore,
 						jobStore: stores.jobStore,
-						spawn: (job, input) => void jobRunner.runJob(job.id, input),
+						spawn: spawnJob,
 						// The registry drop's signal (2026-09-20): no live engine
 						// = no research tool in the teacher's registry.
 						searchAvailable,
@@ -821,12 +880,12 @@ async function runChatInput(
 					{
 						chatId,
 						chatStore: stores.chatStore,
-						deliver: (steer) => void deliverJobResult(steer),
+						deliver: (steer) => void deliverCallerSteer(steer).catch(() => undefined),
 						// Fix wave (2026-09-20): the prober carries research + pdf
 						// dispatch (owner ruling — phase-omnipresent), so its ctx
 						// needs the same job wiring as the teacher's.
 						jobStore: stores.jobStore,
-						spawn: (job, input) => void jobRunner.runJob(job.id, input),
+						spawn: spawnJob,
 						searchAvailable,
 						// The map reader (wave 7): the prober reads the learner's
 						// knowledge graph through tools when the gate opens —
@@ -859,6 +918,8 @@ async function runChatInput(
 		// JSONL event stream with the record's turns; no-op unless
 		// LH_PROVIDER_EVENTS=1.
 		providerEventNote(chatId, "turn", `run start (base: ${agentMessages.length} messages)`);
+		const clientCompletion = client ? Promise.withResolvers<void>() : undefined;
+		let clientError: Error | undefined;
 		const handle = runPiTurn({
 			agent: constructed,
 			requestCycle,
@@ -883,13 +944,15 @@ async function runChatInput(
 			// route through here: they ride the error-result path and reach the
 			// transcript directly (the retry context the model saw).
 			onError: (error) => {
-				if (conversation.provider === "chatgpt") return chatGPTStreamError(String(error));
-				if (isSubscriptionProvider(conversation.provider)) return nativeSubscriptionError(conversation.provider, String(error));
+				if (client) clientError = new Error("The external model turn did not finish.");
+				if (provider === "chatgpt") return chatGPTStreamError(String(error));
+				if (subscription) return nativeSubscriptionError(subscription, String(error));
 				console.error(`[chat ${chatId}] turn error:`, error);
 				return "An error occurred.";
 			},
 			onSettleError: settlementErrorText,
 			onSettleFailure: (error, reportedErrorText) => {
+				clientCompletion?.reject(error);
 				if (preparation && !preparation.isCurrent()) return;
 				// POST only acknowledges acceptance; the submitter may attach
 				// after this turn has already failed and left the registry.
@@ -905,7 +968,10 @@ async function runChatInput(
 				settleSteers(chatId, persisted, true, constructed);
 			},
 			onFinish: (turnMessages, isAborted) => {
-				if (preparation && !preparation.isCurrent()) return;
+				if (preparation && !preparation.isCurrent()) {
+					clientCompletion?.reject(new Error("The external model turn lost its submission claim."));
+					return;
+				}
 				// Wave B: append only messages past the temporary agent prefix.
 				// Retry's saved record still includes its earlier failed attempts.
 				// Unadmitted reference entries cannot become delivery watermarks
@@ -969,30 +1035,35 @@ async function runChatInput(
 				// beneath-threshold record is a silent no-op. Skipped under
 				// tests (the extraction precedent — scripted chats are
 				// fixtures; the service itself is pinned directly).
-				if (process.env.NODE_ENV !== "test" && !pendingSideBudgetError && (!requestCycle || requestCycle.dispatched))
+				if (process.env.NODE_ENV !== "test" && !pendingSideBudgetError && (!requestCycle || requestCycle.dispatched)) {
 					kickCompaction(() => {
 						const fresh = effectiveSettings();
-						const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, fresh.models.strong);
-						if (!spec || !connectionBackgroundAllowed(spec.provider)) return null;
+						const spec = client ? null : resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, fresh.models.strong);
+						if (client?.signal.aborted || (!client && (!spec || !connectionBackgroundAllowed(spec.provider)))) return null;
 						let kickEngine: PiEngine;
-						try { kickEngine = piEngineForSpec(spec, true, undefined, retentionForSlot("strong")); } catch { return null; }
+						try { kickEngine = spec ? piEngineForSpec(spec, true, undefined, retentionForSlot("strong")) : client!.engine("compaction"); }
+						catch { return null; }
 						const kickModelId = `${kickEngine.model.provider}:${kickEngine.model.id}`;
 						const freshRecord = stores.chatStore.getChat(chatId);
 						if (!freshRecord) return null;
 						return {
 							chatStore: stores.chatStore,
 							engine: kickEngine,
-							canStart: () => !isTurnRunning(chatId) && connectionBackgroundAllowed(spec.provider),
+							canStart: () => !isTurnRunning(chatId) && (client ? !client.signal.aborted : connectionBackgroundAllowed(spec?.provider)),
 							modelId: kickModelId,
 							kind: freshRecord.kind === "practice" ? "practice" : hasProbeDone(freshRecord.messages) ? "teach" : "probe",
 							includeReasoning: fresh.compaction.includeReasoning,
 							thresholdTokens: effectiveThresholdTokens(
 								fresh.compaction?.thresholdTokens,
-								catalogContextLimits().get(kickModelId),
+								client ? kickEngine.model.contextWindow || undefined : catalogContextLimits().get(kickModelId),
 							),
 							systemPromptTokens: Math.ceil(composeInstructions(freshRecord.kind === "practice" ? "practice" : "teacher").length / 4),
 						};
 					}, chatId);
+					if (client && compactionInFlight(chatId)) void client.track(awaitCompaction(chatId)).catch(() => undefined);
+				}
+				if (clientError || isAborted) clientCompletion?.reject(clientError ?? new Error("The turn was cancelled."));
+				else clientCompletion?.resolve();
 			},
 		});
 		// The turn is now a live background object: register it so any view
@@ -1003,6 +1074,11 @@ async function runChatInput(
 		if (preparation) preparation.handoff(handle);
 		else registerTurn(chatId, handle);
 		handedOff = true;
+		if (client && clientCompletion) {
+			client.signal.addEventListener("abort", handle.abort, { once: true });
+			void client.track(clientCompletion.promise.finally(() => client.signal.removeEventListener("abort", handle.abort))).catch(() => undefined);
+			if (client.signal.aborted) handle.abort();
+		}
 		// CONNECTION DIET B (owner, 2026-10-10 — the parallel-session freeze
 		// postmortem): the POST no longer holds the turn's SSE stream open for
 		// its whole duration. It acknowledges acceptance and CLOSES; the

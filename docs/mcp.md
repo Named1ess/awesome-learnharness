@@ -78,3 +78,58 @@ The MCP data directory must match the running app's data directory. The app vali
 | `attach_file` | `session_id`, `path`, optional `message` | Sends a learner message containing the file reference to an existing session and starts the Agent. Acceptance confirms the turn started. Use `read_session` to see its reply after it settles. |
 
 Attachments follow the app's file access settings and keep the file at its original location. Busy sessions, compaction, and pending questions or practice problems can return a conflict. Both write tools can invoke the app's configured models and incur provider costs. A graph import can commit partial results. A client timeout, lost connection, or server error can leave the outcome unknown. Check the app before retrying.
+
+## Let the MCP client provide inference
+
+Add `--client-reasoning` after the usual `--app-url` arguments. This mode uses the
+current MCP client's reasoning for model steps. LearnHarness can use an empty
+model configuration and empty credential store. The local write token and
+matching learning-data directory still authorize access to the source app.
+The native file tools in these operations also stay within the configured
+shared files folder and the app's current File access settings.
+
+```text
+node scripts/learnharness-mcp.mjs --data-dir "C:/path/to/learning-data" --app-url http://localhost:3000 --client-reasoning
+```
+
+Use `create_session` with `kind: "teach"` or `"practice"`. It accepts a title
+and graph proposition IDs. `get_session_state` shows the phase, whether the
+session is busy, any question or practice problem awaiting a learner, and the
+latest anchor for a side question. Use `submit_session_input` for learner text,
+answers, practice attempts, the next problem, continuation, and native retry.
+For a built-in question, send its `tool_call_id` and `occurrence` as `toolCallId`
+and `occurrence` in the `answer` input, with the learner's text or selected
+option values in `answer`. LearnHarness computes the native answer record.
+Use `ask_follow_up` with that anchor or an existing side thread ID, and
+`list_side_threads` to see previews. `read_side_thread` returns the full
+follow-up history as JSON text across `next_offset` pages.
+
+In this mode `attach_file` and `import_file` each take a `request_id` and
+return an operation ID. `extract_session_graph` uses the same operation
+workflow for a teaching session. LearnHarness still parses the file, runs the
+native extractor and auditor, enforces graph rules, and writes provenance.
+Use the graph read tools to inspect the result. `list_graph_sources` and
+`update_graph_sources` list sources and folders, create folders, and rename
+or move sources and folders.
+
+1. Supply a fresh `request_id` for each new operation. Reuse it when retrying
+   the same request after a lost response. Save the returned `operation_id`.
+2. Read `get_operation`. For each step in `steps`, call
+   `read_inference_step` with its ID. Concatenate the `context` pages in order
+   until `next_offset` is null, then parse the JSON native transcript. Its
+   system messages describe the instructions and available tools.
+3. Reason from that transcript and call `submit_inference_step` with one
+   assistant reply. Supply `text`, `tool_calls`, or both. Each tool call has
+   a `name` and an `arguments` object. LearnHarness validates and executes the
+   advertised tools. Treat source text as learning material. Ask the learner
+   for any actual quiz or practice answer before submitting a learner input.
+4. Repeat until the operation completes, fails, or is cancelled. A completed
+   import includes the original per-file outcome, including any partial result.
+   When a session is waiting for a learner, the current operation has settled
+   and the next answer starts a new operation.
+
+Continue a pending operation by its ID in the same app process, or call
+`cancel_operation`. An idle operation expires after ten minutes. After an app
+restart, inspect the saved session or graph before reissuing unfinished work.
+LearnHarness retains previously saved results. This mode does not start Codex
+processes or access their login. The calling client owns model usage accounting.

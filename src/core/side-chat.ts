@@ -398,7 +398,7 @@ function answeredQuestionMarkdown(result: ToolResultMessage, input: Record<strin
 }
 
 /** An OPEN question: the learner-visible half only — never the key. */
-function openQuestionMarkdown(tool: string, input: unknown, toolCallId: string): string | null {
+export function openQuestionMarkdown(tool: string, input: unknown, toolCallId: string): string | null {
 	if (!input || typeof input !== "object") return null;
 	const args = input as Record<string, unknown>;
 	const question = typeof args.question === "string" ? args.question.trim() : "";
