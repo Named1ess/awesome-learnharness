@@ -103,6 +103,14 @@ test("client reasoning discovers workflow tools and preserves the authenticated 
 	const calls: { url: string | undefined; headers: IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
 	const appReply = { operation_id: "op_1", status: "needs_model_reply", steps: [{ id: "step_1", role: "extractor" }] };
 	const stepReply = { context: '{"system_prompt":"Extract', next_offset: 10 };
+	const pendingTask = { id: "task_1", lessonId: "lesson_1", kind: "answer", status: "pending" };
+	const claimedTask = {
+		task: { ...pendingTask, status: "claimed" },
+		lesson: { id: "lesson_1", title: "Completing the square", problem: "Solve x² + 4x = 5." },
+		question: { id: "question_1", timeMs: 7200, text: "Why add four here?" },
+		segment: { startMs: 5000, endMs: 10000, label: "Complete the square", narration: "Square half the coefficient." },
+	};
+	const completedTask = { ...pendingTask, status: "completed" };
 	const app = createServer(async (request, response) => {
 		const chunks: Buffer[] = [];
 		for await (const chunk of request) chunks.push(chunk);
@@ -113,6 +121,12 @@ test("client reasoning discovers workflow tools and preserves the authenticated 
 			response.writeHead(409).end(JSON.stringify({ error: "The operation already settled", code: "settled" }));
 		} else if (body.operation === "read_inference_step") {
 			response.end(JSON.stringify(stepReply));
+		} else if (body.operation === "list_lesson_tasks") {
+			response.end(JSON.stringify({ tasks: [pendingTask] }));
+		} else if (body.operation === "claim_lesson_task") {
+			response.end(JSON.stringify(claimedTask));
+		} else if (body.operation === "complete_lesson_task") {
+			response.end(JSON.stringify(completedTask));
 		} else {
 			response.end(JSON.stringify(appReply));
 		}
@@ -137,12 +151,16 @@ test("client reasoning discovers workflow tools and preserves the authenticated 
 	}), rpcOptions);
 	const { tools } = await client.listTools();
 	assert.deepEqual(tools.map(tool => tool.name).sort(), [
-		"ask_follow_up", "attach_file", "cancel_operation", "create_session", "extract_session_graph", "get_operation",
-		"get_session_state", "import_file", "list_chains", "list_graph_sources", "list_propositions", "list_sessions",
+		"ask_follow_up", "attach_file", "cancel_operation", "claim_lesson_task", "complete_lesson_task", "create_session",
+		"extract_session_graph", "get_operation", "get_session_state", "import_file", "list_chains", "list_graph_sources",
+		"list_lesson_tasks", "list_propositions", "list_sessions",
 		"list_side_threads", "read_inference_step", "read_session", "read_side_thread", "submit_inference_step", "submit_session_input", "update_graph_sources",
 	]);
 	assert.equal(tools.find(tool => tool.name === "read_inference_step")?.annotations?.readOnlyHint, true);
 	assert.equal(tools.find(tool => tool.name === "submit_inference_step")?.annotations?.readOnlyHint, false);
+	assert.equal(tools.find(tool => tool.name === "list_lesson_tasks")?.annotations?.readOnlyHint, true);
+	assert.equal(tools.find(tool => tool.name === "claim_lesson_task")?.annotations?.readOnlyHint, false);
+	assert.equal(tools.find(tool => tool.name === "complete_lesson_task")?.annotations?.readOnlyHint, false);
 	const invoke = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args }, undefined, rpcOptions);
 	const decode = (result: Awaited<ReturnType<typeof invoke>>) => {
 		assert.ok(Array.isArray(result.content));
@@ -155,6 +173,13 @@ test("client reasoning discovers workflow tools and preserves the authenticated 
 	assert.equal((await invoke("submit_session_input", { session_id: "chat_fixture", request_id: "send_1", input: { type: "text", text: " " } })).isError, true);
 	assert.equal((await invoke("update_graph_sources", { action: { action: "delete-folder", id: "folder_1" } })).isError, true);
 	assert.equal((await invoke("submit_inference_step", { operation_id: "op_1", step_id: "step_1", reply: {} })).isError, true);
+	assert.equal((await invoke("claim_lesson_task", { task_id: "task_1" })).isError, true);
+	assert.equal((await invoke("complete_lesson_task", {
+		task_id: "task_1", request_id: "claim_1", result: { kind: "answer", answer: "   " },
+	})).isError, true);
+	assert.equal((await invoke("complete_lesson_task", {
+		task_id: "task_1", request_id: "claim_1", result: { kind: "answer", answer: "Four is two squared.", timeMs: 7200 },
+	})).isError, true);
 	assert.equal(calls.length, 0);
 	const importArgs = { path: "course notes/lecture.pdf", request_id: "import_1" };
 	const imported = await invoke("import_file", importArgs);
@@ -174,6 +199,12 @@ test("client reasoning discovers workflow tools and preserves the authenticated 
 	const cancelled = await invoke("cancel_operation", { operation_id: "op_1" });
 	assert.equal(cancelled.isError, true);
 	assert.deepEqual(decode(cancelled), { error: "The operation already settled", code: "settled" });
+	const lessonListArgs = { lesson_id: "lesson_1" };
+	const lessonClaimArgs = { task_id: "task_1", request_id: "claim_1" };
+	const lessonCompleteArgs = { ...lessonClaimArgs, result: { kind: "answer", answer: "Square half of four; that is two squared." } };
+	assert.deepEqual(decode(await invoke("list_lesson_tasks", lessonListArgs)), { tasks: [pendingTask] });
+	assert.deepEqual(decode(await invoke("claim_lesson_task", lessonClaimArgs)), claimedTask);
+	assert.deepEqual(decode(await invoke("complete_lesson_task", lessonCompleteArgs)), completedTask);
 	assert.deepEqual(calls.map(({ body }) => body), [
 		{ operation: "import_file", ...importArgs },
 		{ operation: "attach_file", ...attachArgs },
@@ -181,6 +212,9 @@ test("client reasoning discovers workflow tools and preserves the authenticated 
 		{ operation: "read_inference_step", ...ids, offset: 0 },
 		{ operation: "submit_inference_step", ...submitted },
 		{ operation: "cancel_operation", operation_id: "op_1" },
+		{ operation: "list_lesson_tasks", ...lessonListArgs },
+		{ operation: "claim_lesson_task", ...lessonClaimArgs },
+		{ operation: "complete_lesson_task", ...lessonCompleteArgs },
 	]);
 	const proof = createHmac("sha256", token).update("learnharness-mcp-write-v1\0").update(realpathSync.native(root)).digest("hex");
 	for (const { url: endpoint, headers } of calls) {

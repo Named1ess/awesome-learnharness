@@ -1,11 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import path from "node:path";
 import { IMPORT_EXTENSIONS, MAX_IMPORT_BYTES, UNSUPPORTED_TYPE_MESSAGE } from "../../lib/notes-import-limits.ts";
 import { PATHS } from "../../config.ts";
 import { resolvePolicy, type FileAccessPolicy } from "../agent/tools/file-access.ts";
-import { resolveSourcePath } from "../agent/tools/fs-shared.ts";
 import { parseFilePaths, quoteFilePath } from "../core/file-paths.ts";
 import { isMcpWriteToken, MCP_PROFILE_HEADER, mcpWriteOperationSchema, mcpWriteProfileProof, type McpWriteOperation } from "../mcp/write-protocol.ts";
 import { MCP_CLIENT_HEADER, MCP_CLIENT_REQUEST_BYTES, mcpClientOperationSchema, type McpClientOperation } from "../mcp/client-protocol.ts";
@@ -14,15 +13,14 @@ import { CustomBodyLimitError, readBoundedJson } from "./custom-provider-body.ts
 import { browserOnlyMode } from "./desktop-access.ts";
 import { fileAccessPolicy } from "./file-access.ts";
 import { MCP_LOOPBACK_AUTHORITY, resolveMcpFilesDirectory } from "./mcp-settings.ts";
+import { checkedFile, InvalidDocument, isRelativeFile, isSingleLinkFile } from "./mcp-shared-file.ts";
 
 const MAX_BODY_BYTES = 16 * 1024;
-const INVALID_PATH_CHARACTER = /[\\:\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
-const WINDOWS_DEVICE = /^(?:CON(?:IN\$|OUT\$)?|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])(?:\.|$)/i;
 const OPEN_FILE_POLICY = { restricted: false, folders: [], unavailable: [] };
 const FILE_REFUSAL = "The document is unavailable or outside the approved file access.";
 const MCP_WRITES_DISABLED = "MCP writes are disabled in LearnHarness Settings.";
 const CLIENT_OBSERVATION_OPERATIONS: ReadonlySet<McpClientOperation["operation"]> = new Set([
-	"get_session_state", "list_side_threads", "read_side_thread", "list_graph_sources", "get_operation", "cancel_operation",
+	"get_session_state", "list_side_threads", "read_side_thread", "list_graph_sources", "get_operation", "cancel_operation", "list_lesson_tasks",
 ]);
 
 interface McpWriteDependencies {
@@ -34,7 +32,6 @@ interface McpWriteDependencies {
 	attachmentPolicy?: () => FileAccessPolicy;
 }
 
-class InvalidDocument extends Error {}
 class DocumentTooLarge extends Error {}
 
 function errorResponse(message: string, status: number): Response {
@@ -43,37 +40,6 @@ function errorResponse(message: string, status: number): Response {
 
 function matchesHex(supplied: string | null, expected: string): boolean {
 	return isMcpWriteToken(supplied) && timingSafeEqual(Buffer.from(supplied, "hex"), Buffer.from(expected, "hex"));
-}
-
-function isRelativeFile(relative: string): boolean {
-	if (INVALID_PATH_CHARACTER.test(relative)) return false;
-	return relative.split("/").every(segment => segment !== "" && segment !== "." && segment !== ".." &&
-		(process.platform !== "win32" || (!/[<>"|?*]|[. ]$/.test(segment) && !WINDOWS_DEVICE.test(segment))));
-}
-
-function isSingleLinkFile(stat: Stats): boolean {
-	return stat.isFile() && stat.nlink === 1;
-}
-
-/** Walk every submitted component before opening any file. The app guard then
- * applies the normal named/canonical sensitive denials and the chosen policy. */
-async function checkedFile(root: string, relative: string, policy: ReturnType<typeof resolvePolicy>): Promise<{ filename: string; stat: Stats }> {
-	const components = relative.split("/");
-	let candidate = root;
-	for (const [index, part] of components.entries()) {
-		candidate = path.join(/* turbopackIgnore: true */ candidate, part);
-		const stat = await lstat(/* turbopackIgnore: true */ candidate);
-		const last = index === components.length - 1;
-		if (stat.isSymbolicLink() || (last ? !isSingleLinkFile(stat) : !stat.isDirectory())) throw new InvalidDocument();
-		const canonical = await realpath(/* turbopackIgnore: true */ candidate);
-		if (path.relative(candidate, canonical) !== "") throw new InvalidDocument();
-		if (last) {
-			const filename = resolveSourcePath(candidate, policy);
-			if (path.relative(canonical, filename) !== "") throw new InvalidDocument();
-			return { filename, stat };
-		}
-	}
-	throw new InvalidDocument();
 }
 
 async function readDocument(file: { filename: string; stat: Stats }): Promise<Uint8Array<ArrayBuffer>> {

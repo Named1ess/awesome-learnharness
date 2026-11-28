@@ -141,3 +141,22 @@ Continue a pending operation by its ID in the same app process, or call
 restart, inspect the saved session or graph before reissuing unfinished work.
 LearnHarness retains previously saved results. This mode does not start Codex
 processes or access their login. The calling client owns model usage accounting.
+
+## Use LearnHarness as an MCP client
+
+On a local Windows source installation, set `LH_STANDALONE_LESSONS=1` in the server's environment. In **Settings**, add the project's DeepSeek API key and select `deepseek-flash` for the model slots. Set **Compaction threshold** to 1,000,000 to use the model's 1M context. LearnHarness keeps space for the response. The optional `LH_AUTH_FILE` points to the project's private credential file outside the repository.
+
+The **MCP** settings page can verify Streamable HTTP servers and enable individual tools for learning conversations. Use **Connect Notion** to authorize the project in your browser. LearnHarness exchanges the OAuth code and maintains the connection on the server. Saving an answered question updates its linked Notion page or creates a private note and records the page's URL in the lesson.
+
+With standalone video lessons enabled, **Create video task**, **Queue question**, and **Save to Notion** run on the LearnHarness server. The worker reads the local OpenMotion Director skill via the installed OpenMotion MCP launcher, asks the configured DeepSeek model to write a storyboard, synthesizes local Mandarin narration, and imports the verified MP4. Keep Windows Mandarin speech and the local OpenMotion runtime installed. A storage or provider failure shows a retry action on the lesson page. On restart, the worker resumes its saved claims and retains saved answers, video exports and Notion links.
+
+## Handle video lesson tasks from an external MCP client
+
+Open **Video lessons** in LearnHarness and start a lesson with a title and the original problem. LearnHarness queues requests from the page. Ask your currently authorized Codex chat to handle the lesson's pending tasks. The app records task state and the client provides reasoning and tool calls.
+
+1. Call `list_lesson_tasks` with that `lesson_id`. Claim an entry with `claim_lesson_task`, giving its `task_id` and a fresh `request_id`. Keep the same request ID for retransmission and completion.
+2. For a `render` task, use the OpenMotion Skill to create and verify an MP4. Put the export under the effective MCP shared files folder. Complete the task with `kind: "video"`, its `relativePath`, `projectId`, `versionId`, `durationMs`, and ordered `segments`. Each segment has `startMs`, `endMs`, `label`, `narration`, and `onScreen`. Use the actual exported audio and video timeline. Segments must cover the whole timeline consecutively, up to 30 minutes. LearnHarness copies the video into its own profile and serves captions against that version.
+3. For an `answer` task, use the original problem, saved `question.timeMs`, and the matched `segment` from the claim. Reply with `kind: "answer"` and `answer`. The lesson sidebar updates and lets the learner replay the question's position.
+4. For a `notion` task, save the selected answered question and its timestamped lesson link (`/lessons/<id>?t=<timeMs>`) using the authorized Notion connection. If the claim already contains `notionUrl`, update that page. Otherwise use the learner's chosen destination, or a private draft for personal capture. Complete with `kind: "notion"` and the returned Notion page `url`. A localhost replay link opens on the LearnHarness computer.
+
+Pass each result to `complete_lesson_task` with the claim's `task_id` and `request_id`. Repeat an uncertain completion with the same result. If the task actually failed, complete with `kind: "failure"` and a short `message`; the learner can retry it from the page. The browser shows requests that are waiting for the current client. No provider key is required in LearnHarness.

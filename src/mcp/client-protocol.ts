@@ -82,6 +82,28 @@ const inferenceReply = z.strictObject({
 	tool_calls: z.array(z.strictObject({ name: nonblank, arguments: z.record(z.string(), z.json()) })).optional(),
 }).refine(reply => !!reply.text?.trim() || !!reply.tool_calls?.length, "Provide nonblank text or at least one tool call");
 
+const lessonTask = z.strictObject({ task_id: identifier, ...request });
+const lessonSegment = z.strictObject({
+	startMs: z.int().nonnegative(),
+	endMs: z.int().positive(),
+	label: nonblank,
+	narration: z.string(),
+	onScreen: z.string(),
+});
+const lessonTaskResult = z.discriminatedUnion("kind", [
+	z.strictObject({
+		kind: z.literal("video"),
+		relativePath: importFileArguments.shape.path,
+		projectId: nonblank,
+		versionId: nonblank,
+		durationMs: z.int().positive(),
+		segments: z.array(lessonSegment).min(1),
+	}),
+	z.strictObject({ kind: z.literal("answer"), answer: nonblank }),
+	z.strictObject({ kind: z.literal("notion"), url: z.url({ protocol: /^https$/ }) }),
+	z.strictObject({ kind: z.literal("failure"), message: nonblank }),
+]);
+
 export const mcpClientToolInputs = {
 	create_session: z.strictObject({ title: z.string().optional(), kind: z.enum(["teach", "practice"]), proposition_ids: z.array(nonblank).max(64).optional() }),
 	get_session_state: session,
@@ -98,6 +120,9 @@ export const mcpClientToolInputs = {
 	read_inference_step: step.extend({ offset }),
 	submit_inference_step: step.extend({ reply: inferenceReply }),
 	cancel_operation: operation,
+	list_lesson_tasks: z.strictObject({ lesson_id: identifier.optional() }),
+	claim_lesson_task: lessonTask,
+	complete_lesson_task: lessonTask.extend({ result: lessonTaskResult }),
 };
 
 export const mcpClientOperationSchema = z.discriminatedUnion("operation", [
@@ -116,6 +141,9 @@ export const mcpClientOperationSchema = z.discriminatedUnion("operation", [
 	mcpClientToolInputs.read_inference_step.extend({ operation: z.literal("read_inference_step") }),
 	mcpClientToolInputs.submit_inference_step.extend({ operation: z.literal("submit_inference_step") }),
 	mcpClientToolInputs.cancel_operation.extend({ operation: z.literal("cancel_operation") }),
+	mcpClientToolInputs.list_lesson_tasks.extend({ operation: z.literal("list_lesson_tasks") }),
+	mcpClientToolInputs.claim_lesson_task.extend({ operation: z.literal("claim_lesson_task") }),
+	mcpClientToolInputs.complete_lesson_task.extend({ operation: z.literal("complete_lesson_task") }),
 ]);
 
 export type McpClientOperation = z.infer<typeof mcpClientOperationSchema>;

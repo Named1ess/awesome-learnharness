@@ -1,0 +1,5 @@
+import { handleVideoLessons } from "@/src/server";
+
+type Context = { params: Promise<{ id: string }> };
+export async function GET(request: Request, context: Context) { return handleVideoLessons(request, (await context.params).id); }
+export async function POST(request: Request, context: Context) { return handleVideoLessons(request, (await context.params).id); }

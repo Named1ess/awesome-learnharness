@@ -19,6 +19,7 @@ import { sideChats } from "./side-chat.ts";
 import { SourceOrganizationInputError } from "./source-organization.ts";
 import { stores } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
+import { claimVideoLessonTask, completeVideoLessonTask, listVideoLessonTasks, VideoLessonError } from "./video-lessons.ts";
 
 function requireSession(sessionId: string) {
 	const record = stores.chatStore.getChat(sessionId);
@@ -176,10 +177,17 @@ export async function handleMcpClientOperation(operation: McpClientOperation, fi
 			case "read_inference_step": result = clientInferenceBroker.read(operation.operation_id, operation.step_id, operation.offset ?? 0); break;
 			case "submit_inference_step": result = clientInferenceBroker.submit(operation.operation_id, operation.step_id, operation.reply); break;
 			case "cancel_operation": result = clientInferenceBroker.cancel(operation.operation_id); break;
+			case "list_lesson_tasks": result = listVideoLessonTasks(operation.lesson_id); break;
+			case "claim_lesson_task": result = claimVideoLessonTask(operation.task_id, operation.request_id); break;
+			case "complete_lesson_task":
+				result = await completeVideoLessonTask(operation.task_id, operation.request_id, operation.result, filesDirectory);
+				break;
 		}
 		return Response.json(result);
 	} catch (error) {
-		if (isClientInferenceError(error) || error instanceof McpGraphExtractionError) return Response.json({ error: error.message }, { status: error.status });
+		if (isClientInferenceError(error) || error instanceof McpGraphExtractionError || error instanceof VideoLessonError) {
+			return Response.json({ error: error.message }, { status: error.status });
+		}
 		if (error instanceof ChatInputError || error instanceof SideChatInputError || error instanceof SourceOrganizationInputError) {
 			return Response.json({ error: error.message }, { status: 400 });
 		}

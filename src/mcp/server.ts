@@ -10,7 +10,7 @@ import { attachFileArguments, importFileArguments, MCP_RESULT_LIMIT_BYTES } from
 const offsetArgument = z.int().nonnegative().default(0);
 const listArguments = { offset: offsetArgument, limit: z.int().min(1).max(100).default(25) };
 const annotations = { readOnlyHint: true, openWorldHint: false };
-const clientInstructions = "LearnHarness owns the native learning workflow. Use get_operation to find steps for an operation whose status is needs_model_reply. Read every page of each offered step and concatenate the context strings as supplied, then submit that step's assistant text or tool calls. Continue until the operation settles. When the session has a pending question or practice problem, ask the learner for their input.";
+const clientInstructions = "LearnHarness owns the native learning workflow. For a requested video lesson job, list and claim the lesson task, then complete it with its claim request_id. Use get_operation to find steps for a native operation whose status is needs_model_reply. Read every page of each offered step and concatenate the context strings as supplied, then submit that step's assistant text or tool calls. Continue until the operation settles. When the session has a pending question or practice problem, ask the learner for their input.";
 const clientTools = {
 	create_session: "Create a teaching or practice session. To include graph context, use proposition IDs from list_propositions.",
 	get_session_state: "Read pending learner questions, active practice problems, and the latest_side_anchor for opening a follow-up thread.",
@@ -27,9 +27,12 @@ const clientTools = {
 	read_inference_step: "Read one page of a pending inference step. Follow next_offset and concatenate the context strings to reconstruct the native transcript before submitting a reply.",
 	submit_inference_step: "Supply assistant text and/or tool calls for one pending inference step. Use only the tools offered by that step and their declared arguments. Then use get_operation to check what the native workflow needs next.",
 	cancel_operation: "Cancel an unfinished LearnHarness operation.",
+	list_lesson_tasks: "Find pending work enqueued by the learner for video lessons. Supply lesson_id to limit results to a selected lesson.",
+	claim_lesson_task: "Claim an exact lesson task and read the saved lesson, question and time-matched segment when applicable. Choose a fresh request_id and keep it for claim retries and completion.",
+	complete_lesson_task: "Save a lesson task result using its claim request_id. For video, provide the OpenMotion export copied into the approved files directory, its relative MP4 path, project and version IDs, and segments from that version's rendered timeline. For a pause question, answer the saved timestamp's context. For Notion, provide the actual URL returned by the authorized Notion connector. Report failure when the requested work cannot be completed.",
 } satisfies Record<McpClientOperation["operation"], string>;
 const clientReadOnlyTools = new Set<McpClientOperation["operation"]>([
-	"get_session_state", "list_side_threads", "read_side_thread", "list_graph_sources", "get_operation", "read_inference_step",
+	"get_session_state", "list_side_threads", "read_side_thread", "list_graph_sources", "get_operation", "read_inference_step", "list_lesson_tasks",
 ]);
 
 function resultFits(result: unknown): boolean {

@@ -13,7 +13,10 @@ export * from "./source-deletion.ts";
 export { importGraphNotes } from "./notes-import.ts";
 export { handleMcpWriteRequest } from "./mcp-write.ts";
 export { handleMcpSettingsRequest } from "./mcp-settings.ts";
+export { notionMcpStatusResponse, notionMcpConnectResponse, notionMcpCallbackResponse } from "./notion-mcp-http.ts";
 export { handleMcpClientOperation } from "./mcp-client-operations.ts";
+export { handleVideoLessons, handleVideoLessonCaptions } from "./video-lesson-routes.ts";
+export { serveLessonMedia } from "./lesson-media.ts";
 export { NotesImportError } from "../agent/subagents/extraction.ts";
 export { convertPdf } from "../agent/subagents/pdf-ops.ts";
 export { joinPages } from "../agent/subagents/pdf-markdown.ts";
@@ -70,3 +73,4 @@ export { claudeCodeInstallationResponse } from "./claude-code.ts";
 // No import side effects; the boot sync lives in stores.ts.
 export * from "./custom-provider.ts";
 export { customProviderGet, customProviderMutation } from "./custom-provider-http.ts";
+export { handleOutboundMcpRequest } from "./outbound-mcp-routes.ts";

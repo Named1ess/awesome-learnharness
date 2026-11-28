@@ -4,6 +4,8 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 
 import { Button } from "@/components/ui/button";
 import type { McpSettings, McpSetup } from "@/src/core";
 import { SettingsGroup, SettingsRow, SettingsSection, SettingsSegmentedControl, Toggle } from "./controls";
+import { OutboundMcpSettings } from "./outbound-mcp";
+import { NotionMcpSettings } from "./notion-mcp";
 
 const CLIENTS = [
 	{ value: "codex", label: "Codex" },
@@ -231,5 +233,7 @@ export function McpSection() {
 				{copyFeedback && <p role="status" className="text-xs text-muted-foreground">{copyFeedback}</p>}
 			</SettingsGroup>
 		</>}
+		<OutboundMcpSettings />
+		<NotionMcpSettings />
 	</SettingsSection>;
 }

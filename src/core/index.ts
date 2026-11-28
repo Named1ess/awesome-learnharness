@@ -71,6 +71,7 @@ export * from "./fuzzy.ts";
 // the user-settings record's shape/sanitizer (pure) and its fully-resolved
 // view. Browser-safe — the Wave-4 panel imports these directly.
 export * from "./settings.ts";
+export type * from "./video-lessons.ts";
 export * from "./file-access.ts";
 // themes.ts (theme wave, 2026-11-04): the 12-color theme vocabulary, the
 // presets and the theme → CSS-token adapter — pure, shared by the layout,
@@ -110,3 +111,4 @@ export * from "./plugin-submissions.ts";
 export type * from "./plugin-ui.ts";
 export type * from "./plugin-tree.ts";
 export * from "./plugin-agents.ts";
+export type { OutboundMcpServer, OutboundMcpTool } from "./outbound-mcp.ts";

@@ -7,5 +7,9 @@ export async function register() {
 		const { initializePlugins } = await import("./src/server/plugins.ts");
 		try { await initializePlugins(); }
 		catch (error) { console.error("[plugins] Initialization failed; plugin management will report the error:", error); }
+		try {
+			const { startNativeVideoLessonWorker } = await import("./src/server/video-lesson-worker.ts");
+			await startNativeVideoLessonWorker();
+		} catch { console.error("[video-lessons] Could not initialize the local worker."); }
 	}
 }
