@@ -24,6 +24,7 @@ import type {
 	PluginJobMetadata,
 	ExtractionRunUsage,
 	PlanTree,
+	PracticeBookmark,
 	Position,
 	CoverageEntry,
 	SessionCheckpoint,
@@ -52,11 +53,17 @@ export interface PluginTaskRecordStore {
 
 // ─── ChatStore — the session record's home (data/chats) ─────────────────────
 
+export interface PracticeReviewStore {
+	listPracticeRecords(): Iterable<ChatRecord>;
+	/** Returns false when the session or practice occurrence cannot be found. */
+	setPracticeBookmark(chatId: string, occurrence: PracticeBookmark, bookmarked: boolean): boolean;
+}
+
 export interface ChatStore {
 	/** Create a session record (persisted immediately). */
 	/** Create a session record; kind "practice" marks a practice session
 	 *  (absent = teach, the default). */
-	createChat(title: string, kind?: "practice"): ChatRecord;
+	createChat(title: string, kind?: "practice", seed?: Pick<ChatRecord, "id" | "messages" | "settings" | "imageSnapshots">): ChatRecord;
 	/** The full record, or null if unknown id / corrupt file. */
 	getChat(id: string): ChatRecord | null;
 	/** All sessions, newest activity first (the sidebar's list view). */

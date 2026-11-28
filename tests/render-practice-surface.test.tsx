@@ -90,10 +90,13 @@ describe("the practice transcript cards", () => {
 						mode: "recall",
 						modelSolution: "Pair them.",
 					},
+					sourceMessageId: "msg_only_tools",
+					sourceContentIndex: 2,
 				})}
 			/>,
 		);
 		assert.match(html, /data-testid="problem-card"/);
+		assert.match(html, /id="practice-problem-2-msg_only_tools"/);
 		assert.match(html, /Problem/);
 		assert.match(html, /Prove the parity claim\./);
 		assert.doesNotMatch(html, /Pair them\./, "the commitment stays hidden");

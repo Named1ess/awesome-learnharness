@@ -49,6 +49,17 @@ describe("writeFileAtomicSync", () => {
 		assert.equal(fs.readFileSync(file, "utf-8"), "{}");
 	});
 
+	for (const links of [true, false]) {
+		it(`create-only publication preserves the first complete version (hard links ${links ? "enabled" : "unsupported"})`, t => {
+			const file = target("new.json");
+			if (!links) t.mock.method(fs, "linkSync", () => { throw fail("ENOTSUP"); });
+			writeFileAtomicSync(file, "first", { createOnly: true });
+			assert.throws(() => writeFileAtomicSync(file, "later", { createOnly: true }), { code: "EEXIST" });
+			assert.equal(fs.readFileSync(file, "utf8"), "first");
+			assert.deepEqual(temps(file), []);
+		});
+	}
+
 	it("failed saves in folders with non-ASCII characters leave no temp file", (t) => {
 		const file = target("record.json", "old", "José-日本-");
 		t.mock.method(fs, "renameSync", () => { throw fail("EIO"); });

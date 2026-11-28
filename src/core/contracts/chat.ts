@@ -18,6 +18,12 @@ import type { EmissionStats } from "./graph.ts";
  * graph writes. Reading an absent kind does not require a record migration. */
 export type ChatKind = "teach" | "practice";
 
+/** Position of the original problem call in the saved native transcript. */
+export interface PracticeBookmark {
+	messageId: string;
+	contentIndex: number;
+}
+
 /** One persisted native session under data/chats/<id>.json. Messages retain
  * native agent history; transcript rendering groups them into a separate view.
  * Usage, images, plan state and side conversations are session-owned records. */
@@ -31,6 +37,8 @@ export interface ChatRecord {
 	imageSnapshots?: Record<string, ImageSnapshot>;
 	/** The session's kind; an absent field reads as teach. */
 	kind?: ChatKind;
+	/** Learner-saved practice problems. Older records have no bookmarks. */
+	practiceBookmarks?: PracticeBookmark[];
 	/** The session's plan tree, written by the native plan tools. */
 	tree?: PlanTree;
 	/** Append-only usage log, separate from message history: one entry per billed
@@ -357,6 +365,8 @@ export interface ShowImageDetails {
 export interface ArtifactPartProps {
 	part: {
 		type: string;
+		sourceMessageId?: string;
+		sourceContentIndex?: number;
 		state: string;
 		toolCallId: string;
 		input?: unknown;

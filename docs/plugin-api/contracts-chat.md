@@ -13,6 +13,7 @@
 - [ExtractionRunUsage](#extractionrunusage) — supporting declaration
 - [ExtractionStageUsage](#extractionstageusage) — supporting declaration
 - [ImageSnapshot](#imagesnapshot) — supporting declaration
+- [PracticeBookmark](#practicebookmark) — supporting declaration
 - [SideChatAnchor](#sidechatanchor) — supporting declaration
 - [SideChatMessage](#sidechatmessage) — supporting declaration
 - [SideChatThread](#sidechatthread) — supporting declaration
@@ -158,6 +159,7 @@ export interface ChatRecord {
     messages: LhMessage[];
     imageSnapshots?: Record<string, ImageSnapshot>;
     kind?: ChatKind;
+    practiceBookmarks?: PracticeBookmark[];
     tree?: PlanTree;
     turns?: TurnUsage[];
     extractions?: ExtractionRunUsage[];
@@ -167,7 +169,7 @@ export interface ChatRecord {
 }
 ```
 
-**Related types:** [ChatKind](contracts-chat.md#chatkind), [ChatSettings](contracts-chat.md#chatsettings), [ExtractionRunUsage](contracts-chat.md#extractionrunusage), [ImageSnapshot](contracts-chat.md#imagesnapshot), [LhMessage](native-messages.md#lhmessage), [PlanTree](contracts-plan.md#plantree), [SideChatThread](contracts-chat.md#sidechatthread), [TurnUsage](contracts-chat.md#turnusage).
+**Related types:** [ChatKind](contracts-chat.md#chatkind), [ChatSettings](contracts-chat.md#chatsettings), [ExtractionRunUsage](contracts-chat.md#extractionrunusage), [ImageSnapshot](contracts-chat.md#imagesnapshot), [LhMessage](native-messages.md#lhmessage), [PlanTree](contracts-plan.md#plantree), [PracticeBookmark](contracts-chat.md#practicebookmark), [SideChatThread](contracts-chat.md#sidechatthread), [TurnUsage](contracts-chat.md#turnusage).
 
 **Member index** (including nested object members; inherited members are defined in the linked base types):
 
@@ -178,6 +180,7 @@ export interface ChatRecord {
 - [messages](#chatrecord-messages)
 - [imageSnapshots](#chatrecord-imagesnapshots)
 - [kind](#chatrecord-kind)
+- [practiceBookmarks](#chatrecord-practicebookmarks)
 - [tree](#chatrecord-tree)
 - [turns](#chatrecord-turns)
 - [extractions](#chatrecord-extractions)
@@ -229,6 +232,14 @@ The session's kind; an absent field reads as teach.
 
 ```ts
 kind?: ChatKind;
+```
+
+### ChatRecord practiceBookmarks
+
+Learner-saved practice problems. Older records have no bookmarks.
+
+```ts
+practiceBookmarks?: PracticeBookmark[];
 ```
 
 ### ChatRecord tree
@@ -623,6 +634,36 @@ width: number;
 
 ```ts
 height: number;
+```
+
+## PracticeBookmark
+
+Supporting declaration used by a public type. This is not an additional runtime API or SDK helper.
+
+Position of the original problem call in the saved native transcript.
+
+```ts
+export interface PracticeBookmark {
+    messageId: string;
+    contentIndex: number;
+}
+```
+
+**Member index** (including nested object members; inherited members are defined in the linked base types):
+
+- [messageId](#practicebookmark-messageid)
+- [contentIndex](#practicebookmark-contentindex)
+
+### PracticeBookmark messageId
+
+```ts
+messageId: string;
+```
+
+### PracticeBookmark contentIndex
+
+```ts
+contentIndex: number;
 ```
 
 ## SideChatAnchor

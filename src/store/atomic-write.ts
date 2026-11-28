@@ -38,7 +38,7 @@ const RENAME_RETRY_MS = 100;
 /** Replace `file` with `text` (UTF-8). Throws on failure, with the old file
  *  untouched, except when the in-place fallback fails midway: then the temp
  *  file beside it keeps the complete new bytes. */
-export function writeFileAtomicSync(file: string, text: string, options?: { mode?: number; allowInPlaceFallback?: boolean }): void {
+export function writeFileAtomicSync(file: string, text: string, options?: { mode?: number; allowInPlaceFallback?: boolean; createOnly?: boolean }): void {
 	const tmp = `${file}${TEMP_MARKER}${randomUUID()}`;
 	let target: number;
 	try {
@@ -49,6 +49,24 @@ export function writeFileAtomicSync(file: string, text: string, options?: { mode
 			fs.fsyncSync(fd);
 		} finally {
 			fs.closeSync(fd);
+		}
+		// Publish a fully-written first version without replacing a competing writer's file.
+		if (options?.createOnly) {
+			try {
+				fs.linkSync(tmp, file);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code ?? "";
+				if (!["EPERM", "EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"].includes(code)) throw error;
+				// Some data volumes (e.g. exFAT) cannot link files. The single host
+				// can still check the destination and publish in one synchronous turn.
+				if (fs.lstatSync(file, { throwIfNoEntry: false })) {
+					throw Object.assign(new Error("File already exists"), { code: "EEXIST" });
+				}
+				renameRetryingSync(tmp, file, false);
+				return;
+			}
+			removeTemp(tmp);
+			return;
 		}
 		// `file` goes to renameSync exactly as given: test fault hooks match on it.
 		if (renameRetryingSync(tmp, file, options?.allowInPlaceFallback ?? false)) return;

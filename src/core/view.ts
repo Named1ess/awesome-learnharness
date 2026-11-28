@@ -260,7 +260,7 @@ export function projectView(messages: readonly LhMessage[], live?: LiveTurnState
 					const part = toolPartOf(block, live, streamingMessage);
 					const pluginProblem = pluginProblemForCall(messages, { messageId: m.id, contentIndex, toolCallId: block.id, toolName: block.name });
 					if (pluginProblem) { part.pluginProblem = pluginProblem; part.input = pluginProblem.input; }
-					if ((QUESTION_TOOLS as readonly string[]).includes(block.name)) {
+					if (pluginProblem || block.name === "problem" || (QUESTION_TOOLS as readonly string[]).includes(block.name)) {
 						part.sourceMessageId = m.id;
 						part.sourceContentIndex = contentIndex;
 					}

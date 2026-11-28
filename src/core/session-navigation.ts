@@ -18,6 +18,26 @@ export function messageIdFromHash(hash: string): string | null {
 	}
 }
 
+export function practiceProblemAnchorId(messageId: string, contentIndex: number): string {
+	return `practice-problem-${contentIndex}-${messageId}`;
+}
+
+export function practiceProblemHref(chatId: string, messageId: string, contentIndex: number): string {
+	return `/chat/${encodeURIComponent(chatId)}#${encodeURIComponent(practiceProblemAnchorId(messageId, contentIndex))}`;
+}
+
+/** Only navigate to transcript anchors that this app renders. */
+export function sessionAnchorFromHash(hash: string): string | null {
+	const messageId = messageIdFromHash(hash);
+	if (messageId) return messageAnchorId(messageId);
+	try {
+		const anchor = decodeURIComponent(hash.replace(/^#/, ""));
+		return /^practice-problem-\d+-.+$/.test(anchor) ? anchor : null;
+	} catch {
+		return null;
+	}
+}
+
 /** Old empty anchors do not mask a later real one. Ledger order, not date or
  * lexical order, selects the FIRST recorded message in this source. */
 export function propositionSessionHref(node: Pick<GraphNode, "provenance">, chatId: string): string {

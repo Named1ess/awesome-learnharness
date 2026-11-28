@@ -80,12 +80,16 @@ export function preparePluginProblemSubmission(record: { id: string; kind?: stri
 export function pluginProblemAvailabilityOf(record: { messages: readonly LhMessage[] }, resolve?: ProblemTypeResolver): { problemId: string; status: "available" | "unavailable" } | undefined {
   const snapshot = activeProblemOf(record.messages)?.pluginProblem;
   if (!snapshot) return undefined;
-  let available = false;
+  return { problemId: snapshot.problemId, status: isPracticePluginRetryAvailable(snapshot, resolve) ? "available" : "unavailable" };
+}
+
+/** The same plugin capabilities are required when reopening a saved problem. */
+export function isPracticePluginRetryAvailable(snapshot: PluginProblemSnapshot, resolve?: ProblemTypeResolver): boolean {
   try {
     const current = resolve?.(snapshot.pluginId, snapshot.typeId, snapshot.contractVersion);
     if (current?.status === "available" && !current.signal.aborted && (!snapshot.requiresSubmissionRefinement || current.definition.validateSubmission) && (!snapshot.requiresProcessing || current.definition.processSubmission)) {
-      current.requireActive(); available = true;
+      current.requireActive(); return true;
     }
   } catch { /* unavailable is honest */ }
-  return { problemId: snapshot.problemId, status: available ? "available" : "unavailable" };
+  return false;
 }

@@ -5,6 +5,7 @@
  */
 
 export * from "./chat-handler.ts";
+export { handlePracticeRetry } from "./practice-retry.ts";
 export * from "./events-stream.ts";
 export * from "./chats.ts";
 export * from "./graph.ts";
@@ -74,3 +75,4 @@ export { claudeCodeInstallationResponse } from "./claude-code.ts";
 export * from "./custom-provider.ts";
 export { customProviderGet, customProviderMutation } from "./custom-provider-http.ts";
 export { handleOutboundMcpRequest } from "./outbound-mcp-routes.ts";
+export { listPracticeReview, putPracticeBookmark } from "./practice-review.ts";

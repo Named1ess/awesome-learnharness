@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
 	firstSourceTextParts, messageAnchorId, messageIdFromHash, propositionSessionHref, textPartMessageId,
+	practiceProblemAnchorId, practiceProblemHref, sessionAnchorFromHash,
 } from "../src/core/session-navigation.ts";
 import { projectView } from "../src/core/view.ts";
 import type { LhMessage } from "../src/core/native-messages.ts";
@@ -44,6 +45,20 @@ describe("proposition source-session links (owner, 2026-10-13)", () => {
 });
 
 describe("native message anchors survive assistant grouping", () => {
+	it("links to a physical practice card even when its message has no prose", () => {
+		const id = "message with /%# punctuation";
+		const view = projectView([teacher(id, [{ type: "thinking", thinking: "Think" },
+			{ type: "toolCall", id: "pose", name: "problem", arguments: { statement: "Why?" } }])]);
+		const part = view[0]?.parts.find(p => p.type === "tool-problem");
+		assert.ok(part);
+		assert.equal(part.sourceMessageId, id);
+		assert.equal(part.sourceContentIndex, 1);
+		const href = practiceProblemHref("session/id", id, 1);
+		assert.ok(href.startsWith("/chat/session%2Fid#"));
+		assert.equal(sessionAnchorFromHash(href.slice(href.indexOf("#"))), practiceProblemAnchorId(id, 1));
+		assert.equal(sessionAnchorFromHash("#practice-problem--x"), null);
+		assert.equal(sessionAnchorFromHash("#message-old"), "message-old");
+	});
 	it("anchors each native teacher message, not only the group's first ID", () => {
 		const messages = [
 			teacher("msg_a", [{ type: "text", text: "First passage." }]),
