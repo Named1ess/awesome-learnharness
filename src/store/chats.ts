@@ -12,7 +12,9 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { PATHS } from "../../config.ts";
 import { emit } from "../core/events.ts";
-import type { ChatStore } from "../core/ports.ts";
+import type { ChatStore, PracticeReviewStore } from "../core/ports.ts";
+import type { PracticeBookmark } from "../core/contracts.ts";
+import { practiceReviewItems } from "../core/practice-review.ts";
 import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, ImageSnapshot, PlanTree, SideChatThread, TurnUsage } from "../core/contracts.ts";
 import { CURRENT_CHAT_VERSION } from "../core/contracts.ts";
 import type { LhMessage } from "../core/native-messages.ts";
@@ -34,20 +36,30 @@ function chatFile(id: string): string {
  *  phase, busy, pendingQuestion) is already announced by turn-started /
  *  turn-settled, which the sidebar refetches on. Silence here is law,
  *  not oversight. */
-function createChat(title: string, kind?: "practice"): ChatRecord {
+function createChat(title: string, kind?: "practice", seed?: Pick<ChatRecord, "id" | "messages" | "settings" | "imageSnapshots">): ChatRecord {
 	const now = new Date().toISOString();
 	const record: ChatRecord = {
-		id: `chat_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`,
+		id: seed?.id ?? `chat_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`,
 		title: title.trim() || "Untitled session",
 		createdAt: now,
 		updatedAt: now,
-		messages: [],
+		messages: seed?.messages ?? [],
+		...(seed?.settings && { settings: seed.settings }),
+		...(seed?.imageSnapshots && { imageSnapshots: seed.imageSnapshots }),
 		// Practice sessions carry the marker; teach stays ABSENT (absence
 		// reads as teach — pre-practice records never migrate).
 		...(kind === "practice" ? { kind: "practice" as const } : {}),
 	};
 	fs.mkdirSync(PATHS.chats, { recursive: true });
-	writeChat(record);
+	try {
+		writeChat(record, seed !== undefined);
+	} catch (error) {
+		if (seed && (error as NodeJS.ErrnoException).code === "EEXIST") {
+			const existing = getChat(seed.id);
+			if (existing) return existing;
+		}
+		throw error;
+	}
 	emit("chats-changed", {});
 	return { ...record, version: CURRENT_CHAT_VERSION }; // the in-memory twin of what landed on disk
 }
@@ -56,8 +68,8 @@ function createChat(title: string, kind?: "practice"): ChatRecord {
  *  record persist goes through here and carries the CURRENT version stamp —
  *  lazy migration means existing files only get stamped on their next write.
  *  A future-version guard lives on the read side (getChat). */
-function writeChat(record: ChatRecord): void {
-	writeFileAtomicSync(chatFile(record.id), JSON.stringify({ ...record, version: CURRENT_CHAT_VERSION }, null, "\t"), { allowInPlaceFallback: true });
+function writeChat(record: ChatRecord, createOnly = false): void {
+	writeFileAtomicSync(chatFile(record.id), JSON.stringify({ ...record, version: CURRENT_CHAT_VERSION }, null, "\t"), { allowInPlaceFallback: true, createOnly });
 }
 
 function getChat(id: string): ChatRecord | null {
@@ -70,6 +82,7 @@ function getChat(id: string): ChatRecord | null {
 	// Honest refusal (owner ruling 2026-10-10): a record stamped NEWER than
 	// this build (the downgrade scenario) reads as absent, never misparsed —
 	// the next read-modify-write must not rewrite what it doesn't understand.
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
 	const v = (parsed as { version?: unknown }).version;
 	if (typeof v === "number" && v > CURRENT_CHAT_VERSION) {
 		console.error(`[chat ${id}] record stamped with schema version ${v} > ${CURRENT_CHAT_VERSION} — this app build is older; refusing to read it`);
@@ -78,15 +91,40 @@ function getChat(id: string): ChatRecord | null {
 	return parsed as ChatRecord;
 }
 
+function* chatRecords(): Iterable<ChatRecord> {
+	if (!fs.existsSync(PATHS.chats)) return;
+	for (const file of fs.readdirSync(/* turbopackIgnore: true */ PATHS.chats)) {
+		if (!file.endsWith(".json")) continue;
+		const record = getChat(file.slice(0, -5));
+		if (record) yield record;
+	}
+}
+
+function* listPracticeRecords(): Iterable<ChatRecord> {
+	for (const record of chatRecords()) {
+		if (record.kind === "practice" && Array.isArray(record.messages)) yield record;
+	}
+}
+
+function setPracticeBookmark(chatId: string, occurrence: PracticeBookmark, bookmarked: boolean): boolean {
+	const record = getChat(chatId);
+	if (!record || record.kind !== "practice") return false;
+	const matches = (item: PracticeBookmark) => item.messageId === occurrence.messageId && item.contentIndex === occurrence.contentIndex;
+	if (!practiceReviewItems(record).some(matches)) return false;
+	const current = record.practiceBookmarks ?? [];
+	if (current.some(matches) === bookmarked) return true;
+	const next = bookmarked ? [...current, occurrence] : current.filter(item => !matches(item));
+	if (next.length) record.practiceBookmarks = next;
+	else delete record.practiceBookmarks;
+	writeChat(record);
+	return true;
+}
+
 function listChats(): ChatSummary[] {
 	try {
 		fs.mkdirSync(PATHS.chats, { recursive: true });
-		return fs
-			.readdirSync(/* turbopackIgnore: true */ PATHS.chats)
-			.filter((f) => f.endsWith(".json"))
-			.map((f) => getChat(f.slice(0, -5)))
-			.filter((r): r is ChatRecord => r !== null)
-			.map(({ messages, tree, turns, extractions, imageSnapshots: _imageSnapshots, sideChats: _sideChats, ...summary }) => {
+		return Array.from(chatRecords(),
+			({ messages, tree, turns, extractions, practiceBookmarks: _practiceBookmarks, imageSnapshots: _imageSnapshots, sideChats: _sideChats, ...summary }) => {
 				// Per-record isolation (Wave B): a record whose messages fail the
 				// projection (e.g. pre-Wave-B UIMessage-format scratch — the
 				// zero-back-compat wipe makes these "corrupt") must not blank the
@@ -243,7 +281,9 @@ function updateSideChats(id: string, update: (threads: SideChatThread[]) => Side
 	return next;
 }
 
-export const chatStore: ChatStore = {
+export const chatStore: ChatStore & PracticeReviewStore = {
+	listPracticeRecords,
+	setPracticeBookmark,
 	createChat,
 	getChat,
 	listChats,

@@ -2,6 +2,7 @@
 
 import { createContext, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
+import Link from "next/link";
 import { useChatSession } from "@/components/session";
 import { usePlugins } from "./plugins";
 import { PluginSubmissionRunner, SubmissionModelEpoch, type SubmissionAttempt } from "./plugin-submission-runner";
@@ -1742,15 +1743,17 @@ export function Chat({
 					{/* Practice sessions: no phase arc — a quiet Practice tag
 					    instead of the phase chip. */}
 					{kind === "practice" ? (
-						<span
+						<Link
+							href={`/practice-review?session=${encodeURIComponent(chatId)}`}
 							data-testid="phase-chip"
 							data-phase="practice"
-							aria-hidden="true"
-							className="pointer-events-none flex shrink-0 select-none items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+							aria-label="Review this practice session"
+							title="Review this practice session"
+							className="lh-no-drag flex shrink-0 select-none items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
 						>
 							<DumbbellIcon className="size-3" />
 							Practice
-						</span>
+						</Link>
 					) : (
 						<PhaseChip phase={phases.at(-1) ?? "probe"} />
 					)}

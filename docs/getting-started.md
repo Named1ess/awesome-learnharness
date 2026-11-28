@@ -23,6 +23,8 @@ Use the thinking fields to explain your reasoning, uncertainty, or reaction—no
 
 Choose **Practice** for problems rather than a lesson. Start from selected graph material or describe material directly. Submit your thinking as you work; the model's committed solution is revealed when the problem concludes. Use **Next problem** when ready to continue.
 
+Open **Practice review** in the sidebar to find problems from previous sessions. For example, filter by **Solved with hints** and bookmark a problem to revisit. **Original problem** jumps to the question in its conversation, where you can read your work and the feedback. **Practice again** opens the same problem in a fresh session with the solution hidden. Plugin problems use their original editor when the plugin is available.
+
 Sessions are saved locally, including earlier messages when context is compacted. The [keyboard guide](keyboard.md) covers submission, focus, question controls, and cancellation.
 
 ## Dictation

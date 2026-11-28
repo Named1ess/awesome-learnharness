@@ -5,6 +5,7 @@
  */
 
 export * from "./chat-handler.ts";
+export { handlePracticeRetry } from "./practice-retry.ts";
 export * from "./events-stream.ts";
 export * from "./chats.ts";
 export * from "./graph.ts";
@@ -70,3 +71,4 @@ export { claudeCodeInstallationResponse } from "./claude-code.ts";
 // No import side effects; the boot sync lives in stores.ts.
 export * from "./custom-provider.ts";
 export { customProviderGet, customProviderMutation } from "./custom-provider-http.ts";
+export { listPracticeReview, putPracticeBookmark } from "./practice-review.ts";

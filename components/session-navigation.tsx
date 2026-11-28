@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { useStickToBottomContext, type StickToBottomContext } from "use-stick-to-bottom";
-import { messageAnchorId, messageIdFromHash } from "@/src/core";
+import { sessionAnchorFromHash } from "@/src/core";
 
 export type SessionScrollContext = Pick<StickToBottomContext, "scrollRef" | "stopScroll">;
 
@@ -56,9 +56,9 @@ export function SessionMessageNavigation() {
 	const jump = useCallback((): boolean => {
 		const { scrollRef, stopScroll } = contextRef.current;
 		const hash = window.location.hash;
-		const messageId = messageIdFromHash(hash);
+		const anchor = sessionAnchorFromHash(hash);
 		const main = scrollRef.current;
-		const target = messageId ? document.getElementById(messageAnchorId(messageId)) : null;
+		const target = anchor ? document.getElementById(anchor) : null;
 		if (!main || !target || !main.contains(target)) return false;
 		if (lastJump.current?.hash === hash && lastJump.current.target === target) return true;
 		stopScroll();

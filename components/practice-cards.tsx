@@ -2,7 +2,7 @@
 
 import { ToolContentResponse } from "@/components/ai-elements/message";
 import { StatusBadge } from "@/components/ui/status-badge";
-import type { ArtifactPartProps } from "@/src/core";
+import { practiceProblemAnchorId, type ArtifactPartProps } from "@/src/core";
 
 /**
  * The practice transcript cards (practice sessions, owner design
@@ -66,7 +66,9 @@ export function ProblemCard({ part }: ArtifactPartProps) {
 	const input = (part.input ?? {}) as { statement?: string };
 	const statement = typeof input.statement === "string" ? input.statement : "";
 	return (
-		<div data-testid="problem-card" className="lh-card-enter my-1 rounded-xl border bg-card p-4">
+		<div id={part.sourceMessageId && part.sourceContentIndex !== undefined
+			? practiceProblemAnchorId(part.sourceMessageId, part.sourceContentIndex) : undefined}
+			data-testid="problem-card" className="lh-card-enter my-1 rounded-xl border bg-card p-4">
 			<div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Problem</div>
 			<div className="lh-prose text-[15px]">
 				<ToolContentResponse>{statement}</ToolContentResponse>
@@ -75,7 +77,7 @@ export function ProblemCard({ part }: ArtifactPartProps) {
 	);
 }
 
-const OUTCOME_LABEL: Record<string, string> = {
+export const practiceOutcomeLabels: Record<string, string> = {
 	solved: "Solved",
 	solvedWithHints: "Solved with hints",
 	movedOn: "Moved on",
@@ -88,7 +90,7 @@ const OUTCOME_LABEL: Record<string, string> = {
  * green (the "correct" twin), solved-with-hints amber (succeeded with
  * cost), surrendered red (the problem beat the learner), moved on muted
  * (the agent's call, not a verdict against him). */
-const OUTCOME_COLOR: Record<string, string | undefined> = {
+export const practiceOutcomeColors: Record<string, string | undefined> = {
 	solved: "var(--lh-success)",
 	solvedWithHints: "var(--lh-warning)",
 	surrendered: "var(--lh-error)",
@@ -124,8 +126,8 @@ export function ConcludeCard({ part }: ArtifactPartProps) {
 			    no more two same-weight headings stacked. */}
 			<div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
 				Concluded
-				{(OUTCOME_LABEL[outcome] ?? "") !== "" && outcome !== "dismissed" && (
-					<StatusBadge text={OUTCOME_LABEL[outcome] ?? ""} color={OUTCOME_COLOR[outcome]} />
+				{(practiceOutcomeLabels[outcome] ?? "") !== "" && outcome !== "dismissed" && (
+					<StatusBadge text={practiceOutcomeLabels[outcome] ?? ""} color={practiceOutcomeColors[outcome]} />
 				)}
 			</div>
 			{/* The verdict — plain prose under the heading, no 'Verdict:' label
